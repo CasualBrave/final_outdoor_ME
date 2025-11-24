@@ -4,7 +4,16 @@
 #include <imgui_impl_opengl3.h>
 #include <cstdio>
 #include <iostream>
+#include <cstring>
+#include <vector>
+#include <string>
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
 #define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/transform.hpp>
 #include <GLFW/glfw3.h>
 
 #include "Shader.h"
@@ -12,6 +21,7 @@
 #include "MyImGuiPanel.h"
 
 #include "ViewFrustumSceneObject.h"
+#include "DynamicSceneObject.h"
 #include "terrain\MyTerrain.h"
 #include "MyCameraManager.h"
 
@@ -20,7 +30,7 @@ const int INIT_HEIGHT = 512;
 
 // ==============================================
 // You can probably tell these come from class members,
-// but let's make them global for clarity—especially for those less familiar with C++ OOP.
+// but let's make them global for clarityï¿½especially for those less familiar with C++ OOP.
 
 int displayWidth;
 int displayHeight;
@@ -33,9 +43,163 @@ ShaderProgram* defaultShaderProgram = nullptr;
 ViewFrustumSceneObject* m_viewFrustumSO = nullptr;
 MyTerrain* m_terrain = nullptr;
 INANOA::MyCameraManager* m_myCameraManager = nullptr;
+DynamicSceneObject* m_airplaneSO = nullptr;
+DynamicSceneObject* m_magicStoneSO = nullptr;
+
+bool g_useNormalMap = false;
 // ==============================================
 
 void resize_impl(int w, int h);
+DynamicSceneObject* createAirplaneSceneObject();
+DynamicSceneObject* createMagicStoneSceneObject();
+
+GLuint createTextureFromFile(const std::string& fileFullPath) {
+	int width = 0, height = 0, channels = 0;
+	stbi_set_flip_vertically_on_load(true);
+	unsigned char* data = stbi_load(fileFullPath.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+	if (data == nullptr || width <= 0 || height <= 0) {
+		return 0;
+	}
+
+	GLuint texHandle = 0;
+	glGenTextures(1, &texHandle);
+	glBindTexture(GL_TEXTURE_2D, texHandle);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+	glGenerateMipmap(GL_TEXTURE_2D);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	stbi_image_free(data);
+	return texHandle;
+}
+
+DynamicSceneObject* createAirplaneSceneObject()
+{
+	const std::string modelPath = "assets\\outdoor\\airplane.obj";
+	const std::string texturePath = "assets\\outdoor\\Airplane_smooth_DefaultMaterial_BaseMap.jpg";
+
+	Assimp::Importer importer;
+	const aiScene* scene = importer.ReadFile(modelPath,
+		aiProcess_Triangulate |
+		aiProcess_JoinIdenticalVertices |
+		aiProcess_GenSmoothNormals);
+
+	if (scene == nullptr || scene->mNumMeshes == 0) {
+		return nullptr;
+	}
+
+	const aiMesh* mesh = scene->mMeshes[0];
+	const bool hasUV = mesh->HasTextureCoords(0);
+
+	const int numVertices = static_cast<int>(mesh->mNumVertices);
+	const int numIndices = static_cast<int>(mesh->mNumFaces * 3);
+
+	DynamicSceneObject* airplane = new DynamicSceneObject(numVertices, numIndices, true, true);
+
+	float* dataBuffer = airplane->dataBuffer();
+	for (unsigned int i = 0; i < mesh->mNumVertices; i++) {
+		const aiVector3D& v = mesh->mVertices[i];
+		const aiVector3D uv = hasUV ? mesh->mTextureCoords[0][i] : aiVector3D(0.0f, 0.0f, 0.0f);
+
+		dataBuffer[i * 8 + 0] = v.x;
+		dataBuffer[i * 8 + 1] = v.y;
+		dataBuffer[i * 8 + 2] = v.z;
+		dataBuffer[i * 8 + 3] = mesh->mNormals[i].x;
+		dataBuffer[i * 8 + 4] = mesh->mNormals[i].y;
+		dataBuffer[i * 8 + 5] = mesh->mNormals[i].z;
+		dataBuffer[i * 8 + 6] = uv.x;
+		dataBuffer[i * 8 + 7] = uv.y;
+	}
+
+	unsigned int* indexBuffer = airplane->indexBuffer();
+	for (unsigned int f = 0; f < mesh->mNumFaces; f++) {
+		const aiFace& face = mesh->mFaces[f];
+		indexBuffer[f * 3 + 0] = face.mIndices[0];
+		indexBuffer[f * 3 + 1] = face.mIndices[1];
+		indexBuffer[f * 3 + 2] = face.mIndices[2];
+	}
+
+	airplane->updateDataBuffer(0, numVertices * 8 * sizeof(float));
+	airplane->updateIndexBuffer(0, numIndices * sizeof(unsigned int));
+	airplane->setPrimitive(GL_TRIANGLES);
+	airplane->setPixelFunctionId(SceneManager::Instance()->m_fs_texturePass);
+	airplane->setMaterial(glm::vec3(1.0f), glm::vec3(1.0f), 32.0f);
+
+	const GLuint albedoTex = createTextureFromFile(texturePath);
+	if (albedoTex != 0) {
+		airplane->setAlbedoTexture(albedoTex);
+	}
+
+	return airplane;
+}
+
+DynamicSceneObject* createMagicStoneSceneObject()
+{
+	const std::string modelPath = "assets\\outdoor\\MagicRock\\magicRock.obj";
+	const std::string texturePath = "assets\\outdoor\\MagicRock\\StylMagicRocks_AlbedoTransparency.png";
+
+	Assimp::Importer importer;
+	const aiScene* scene = importer.ReadFile(modelPath,
+		aiProcess_Triangulate |
+		aiProcess_JoinIdenticalVertices |
+		aiProcess_GenSmoothNormals);
+
+	if (scene == nullptr || scene->mNumMeshes == 0) {
+		return nullptr;
+	}
+
+	const aiMesh* mesh = scene->mMeshes[0];
+	const bool hasUV = mesh->HasTextureCoords(0);
+
+	const int numVertices = static_cast<int>(mesh->mNumVertices);
+	const int numIndices = static_cast<int>(mesh->mNumFaces * 3);
+
+	DynamicSceneObject* stone = new DynamicSceneObject(numVertices, numIndices, true, true);
+
+	float* dataBuffer = stone->dataBuffer();
+	for (unsigned int i = 0; i < mesh->mNumVertices; i++) {
+		const aiVector3D& v = mesh->mVertices[i];
+		const aiVector3D uv = hasUV ? mesh->mTextureCoords[0][i] : aiVector3D(0.0f, 0.0f, 0.0f);
+
+		dataBuffer[i * 8 + 0] = v.x;
+		dataBuffer[i * 8 + 1] = v.y;
+		dataBuffer[i * 8 + 2] = v.z;
+		dataBuffer[i * 8 + 3] = mesh->mNormals[i].x;
+		dataBuffer[i * 8 + 4] = mesh->mNormals[i].y;
+		dataBuffer[i * 8 + 5] = mesh->mNormals[i].z;
+		dataBuffer[i * 8 + 6] = uv.x;
+		dataBuffer[i * 8 + 7] = uv.y;
+	}
+
+	unsigned int* indexBuffer = stone->indexBuffer();
+	for (unsigned int f = 0; f < mesh->mNumFaces; f++) {
+		const aiFace& face = mesh->mFaces[f];
+		indexBuffer[f * 3 + 0] = face.mIndices[0];
+		indexBuffer[f * 3 + 1] = face.mIndices[1];
+		indexBuffer[f * 3 + 2] = face.mIndices[2];
+	}
+
+	stone->updateDataBuffer(0, numVertices * 8 * sizeof(float));
+	stone->updateIndexBuffer(0, numIndices * sizeof(unsigned int));
+	stone->setPrimitive(GL_TRIANGLES);
+	stone->setPixelFunctionId(SceneManager::Instance()->m_fs_texturePass);
+	stone->setMaterial(glm::vec3(1.0f), glm::vec3(1.0f), 32.0f);
+
+	const GLuint albedoTex = createTextureFromFile(texturePath);
+	if (albedoTex != 0) {
+		stone->setAlbedoTexture(albedoTex);
+	}
+	const GLuint normalTex = createTextureFromFile("assets\\outdoor\\MagicRock\\StylMagicRocks_NormalOpenGL.png");
+	if (normalTex != 0) {
+		stone->setNormalTexture(normalTex);
+	}
+
+	return stone;
+}
+
 
 bool on_init(int displayWidth, int displayHeight)
 {
@@ -80,6 +244,18 @@ bool on_init(int displayWidth, int displayHeight)
 	m_viewFrustumSO = new ViewFrustumSceneObject(2, SceneManager::Instance()->m_fs_pixelProcessIdHandle, SceneManager::Instance()->m_fs_pureColor);
 	defaultRenderer->appendDynamicSceneObject(m_viewFrustumSO->sceneObject());
 
+	// initialize airplane
+	m_airplaneSO = createAirplaneSceneObject();
+	if (m_airplaneSO != nullptr) {
+		defaultRenderer->appendDynamicSceneObject(m_airplaneSO);
+	}
+
+	// initialize magic stone
+	m_magicStoneSO = createMagicStoneSceneObject();
+	if (m_magicStoneSO != nullptr) {
+		defaultRenderer->appendDynamicSceneObject(m_magicStoneSO);
+	}
+
 	// initialize terrain
 	m_terrain = new MyTerrain();
 	m_terrain->init(-1);
@@ -98,6 +274,8 @@ void on_destroy()
 	delete defaultShaderProgram;
 	delete m_myCameraManager;
 	delete m_viewFrustumSO;
+	delete m_airplaneSO;
+	delete m_magicStoneSO;
 	delete m_terrain;
 	delete m_imguiPanel;
 }
@@ -214,6 +392,15 @@ inline void on_display()
 	const glm::mat4 godProjMat = m_myCameraManager->godProjectionMatrix();
 
 	const glm::mat4 airplaneModelMat = m_myCameraManager->airplaneModelMatrix();
+	const glm::mat4 scaledAirplaneModelMat = airplaneModelMat * glm::scale(glm::vec3(1.0f));
+	const glm::mat4 magicStoneModelMat = glm::translate(glm::vec3(25.92f, 18.27f, 11.75f));
+
+	if (m_airplaneSO != nullptr) {
+		m_airplaneSO->setModelMat(scaledAirplaneModelMat);
+	}
+	if (m_magicStoneSO != nullptr) {
+		m_magicStoneSO->setModelMat(magicStoneModelMat);
+	}
 
 	// (x, y, w, h)
 	const glm::ivec4 playerViewport = m_myCameraManager->playerViewport();
@@ -255,6 +442,24 @@ inline void on_gui()
 
 	ImGui::Begin("Information");
 	m_imguiPanel->update();
+
+	// teleport controls
+	if (ImGui::Button("Teleport 1")) {
+		m_myCameraManager->teleport(0);
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Teleport 2")) {
+		m_myCameraManager->teleport(1);
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Teleport 3")) {
+		m_myCameraManager->teleport(2);
+	}
+
+	if (ImGui::Checkbox("Enable Magic Normal Map", &g_useNormalMap)) {
+    	DynamicSceneObject::setGlobalNormalMapToggle(g_useNormalMap);
+	}
+
 	ImGui::End();
 }
 

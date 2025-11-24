@@ -22,37 +22,48 @@ public:
 		return m_instance;
 	}
 	
-	GLuint m_vertexHandle;
-	GLuint m_normalHandle;
-	GLuint m_uvHandle;
+	GLuint m_vertexHandle = 0;
+	GLuint m_normalHandle = 0;
+	GLuint m_uvHandle = 0;
 
-	GLuint m_modelMatHandle;
-	GLuint m_viewMatHandle;
-	GLuint m_projMatHandle;
-	GLuint m_terrainVToUVMatHandle;
+	GLuint m_modelMatHandle = 0;
+	GLuint m_viewMatHandle = 0;
+	GLuint m_projMatHandle = 0;
+	GLuint m_terrainVToUVMatHandle = 0;
 
 
 
-	GLuint m_albedoMapHandle;
-	GLuint m_normalMapHandle;
-	GLuint m_elevationMapHandle;
+	GLuint m_albedoMapHandle = 0;
+	GLuint m_normalMapHandle = 0;
+	GLuint m_elevationMapHandle = 0;
 	
-	GLuint m_fs_pixelProcessIdHandle;
-	GLuint m_vs_vertexProcessIdHandle;
+	GLuint m_fs_pixelProcessIdHandle = 0;
+	GLuint m_vs_vertexProcessIdHandle = 0;
 
-	GLenum m_albedoTexUnit;
-	GLenum m_normalTexUnit;
-	GLenum m_elevationTexUnit;
+	GLenum m_albedoTexUnit = 0;
+	GLenum m_normalTexUnit = 0;
+	GLenum m_elevationTexUnit = 0;
 
 
-	int m_albedoMapTexIdx;
-	int m_elevationMapTexIdx;
-	int m_normalMapTexIdx;
+	int m_albedoMapTexIdx = 0;
+	int m_elevationMapTexIdx = 0;
+	int m_normalMapTexIdx = 0;
 
-	int m_vs_commonProcess;
-	int m_vs_terrainProcess;	
+	int m_vs_commonProcess = 0;
+	int m_vs_terrainProcess = 0;	
 	
-	int m_fs_pureColor;	
-	int m_fs_terrainPass;
+	int m_fs_pureColor = 0;	
+	int m_fs_terrainPass = 0;
+	int m_fs_texturePass = 0;
+
+	// lighting / material (Phong)
+	GLuint m_lightDirHandle = 0;
+	GLuint m_materialAmbientHandle = 0;
+	GLuint m_materialSpecularHandle = 0;
+	GLuint m_materialShininessHandle = 0;
+	GLuint m_useNormalMapHandle = 0;
+
+	// fragment shader normal sampler (for magic stone, etc.)
+	GLuint m_fs_normalTexHandle = 0;
+	int m_fs_normalTexIdx = 0;
 };
-

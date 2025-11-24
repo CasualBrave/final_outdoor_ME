@@ -1,6 +1,5 @@
 #include "TerrainSceneObject.h"
-
-
+#include <glm/vec3.hpp>
 
 TerrainSceneObject::TerrainSceneObject(const int numChunk, const float* chunkVertices, const int numChunkVertex, const unsigned int* chunkIndices, const int numChunkIndex) :
 	m_numChunk(numChunk)
@@ -55,6 +54,14 @@ void TerrainSceneObject::update() {
 	glUniformMatrix4fv(SceneManager::Instance()->m_terrainVToUVMatHandle, 1, false, glm::value_ptr(this->m_worldVertexToElevationMapUvMat));
 
 	glUniform1i(SceneManager::Instance()->m_fs_pixelProcessIdHandle, SceneManager::Instance()->m_fs_terrainPass);
+	// terrain 不用切換 normal map 開關，固定 0
+	glUniform1i(SceneManager::Instance()->m_useNormalMapHandle, 0);
+	// material: ambient = diffuse, specular 0, shininess 1
+	const glm::vec3 ambient(1.0f);
+	const glm::vec3 specular(0.0f);
+	glUniform3fv(SceneManager::Instance()->m_materialAmbientHandle, 1, glm::value_ptr(ambient));
+	glUniform3fv(SceneManager::Instance()->m_materialSpecularHandle, 1, glm::value_ptr(specular));
+	glUniform1f(SceneManager::Instance()->m_materialShininessHandle, 1.0f);
 
 	// render several chunks
 	for (int i = 0; i < this->m_numChunk; i++) {

@@ -18,6 +18,10 @@ void SceneRenderer::renderPass(){
 
 	glUniformMatrix4fv(manager->m_projMatHandle, 1, false, glm::value_ptr(this->m_projMat));
 	glUniformMatrix4fv(manager->m_viewMatHandle, 1, false, glm::value_ptr(this->m_viewMat));
+	// directional light in view space
+	const glm::vec3 lightDirWorld = glm::normalize(glm::vec3(0.4f, 0.5f, 0.8f));
+	glm::vec3 lightDirView = glm::normalize(glm::vec3(this->m_viewMat * glm::vec4(lightDirWorld, 0.0f)));
+	glUniform3fv(manager->m_lightDirHandle, 1, glm::value_ptr(lightDirView));
 
 	if (this->m_terrainSO != nullptr) {
 		glUniform1i(SceneManager::Instance()->m_vs_vertexProcessIdHandle, SceneManager::Instance()->m_vs_terrainProcess);
@@ -94,6 +98,12 @@ bool SceneRenderer::setUpShader(){
 	manager->m_viewMatHandle = 7;
 	manager->m_projMatHandle = 8;
 	manager->m_terrainVToUVMatHandle = 9;
+	manager->m_lightDirHandle = 10;
+	manager->m_materialAmbientHandle = 11;
+	manager->m_materialSpecularHandle = 12;
+	manager->m_materialShininessHandle = 13;
+	manager->m_useNormalMapHandle = 14;
+	manager->m_fs_normalTexHandle = 15;
 
 	manager->m_albedoMapHandle = 4;
 	manager->m_albedoMapTexIdx = 0;
@@ -106,6 +116,9 @@ bool SceneRenderer::setUpShader(){
 	manager->m_normalMapHandle = 6;
 	manager->m_normalMapTexIdx = 2;
 	glUniform1i(manager->m_normalMapHandle, manager->m_normalMapTexIdx);
+	// fragment normal sampler (e.g., magic stone)
+	manager->m_fs_normalTexIdx = 2;
+	glUniform1i(manager->m_fs_normalTexHandle, manager->m_fs_normalTexIdx);
 	
 	manager->m_albedoTexUnit = GL_TEXTURE0;
 	manager->m_elevationTexUnit = GL_TEXTURE3;
@@ -117,6 +130,7 @@ bool SceneRenderer::setUpShader(){
 
 	manager->m_fs_pixelProcessIdHandle = 2;
 	manager->m_fs_pureColor = 5;
+	manager->m_fs_texturePass = 6;
 	manager->m_fs_terrainPass = 7;
 	
 	return true;

@@ -1,0 +1,14 @@
+開始寫 code 前都要做
+git checkout main
+git pull
+
+到自己地方寫code
+git checkout feature-name 
+
+上傳
+git status
+git add .
+git commit -m "Add model loading function"
+git push
+
+到github上面merge
