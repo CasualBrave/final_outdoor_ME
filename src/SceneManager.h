@@ -24,12 +24,15 @@ public:
 	
 	GLuint m_vertexHandle = 0;
 	GLuint m_normalHandle = 0;
+	GLuint m_tangentHandle = 0;
 	GLuint m_uvHandle = 0;
 
 	GLuint m_modelMatHandle = 0;
 	GLuint m_viewMatHandle = 0;
 	GLuint m_projMatHandle = 0;
 	GLuint m_terrainVToUVMatHandle = 0;
+	GLuint m_lightDirWorldHandle = 0;
+	GLuint m_cameraPosHandle = 0;
 
 
 
@@ -57,7 +60,7 @@ public:
 	int m_fs_texturePass = 0;
 
 	// lighting / material (Phong)
-	GLuint m_lightDirHandle = 0;
+	GLuint m_lightDirHandle = 0; // deprecated, kept for compatibility
 	GLuint m_materialAmbientHandle = 0;
 	GLuint m_materialSpecularHandle = 0;
 	GLuint m_materialShininessHandle = 0;

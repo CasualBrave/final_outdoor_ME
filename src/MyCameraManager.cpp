@@ -174,15 +174,13 @@ void MyCameraManager::adjustPlayerCameraHeight(const float terrainHeight) {
 	this->m_playerMyCamera->update();
 }
 void MyCameraManager::setupViewports(const int w, const int h) {
-	this->m_playerViewport[2] = w * 0.5;
-	this->m_playerViewport[0] = w - this->m_playerViewport[2];
-	this->m_playerViewport[1] = 0;
-	this->m_playerViewport[3] = h;
+    int halfW = w / 2;
 
-	this->m_godViewport[2] = this->m_playerViewport[2];
-	this->m_godViewport[0] = 0;
-	this->m_godViewport[1] = 0;
-	this->m_godViewport[3] = h;
+    // god view on the LEFT
+    this->m_godViewport = glm::ivec4(0, 0, halfW, h);
+
+    // player view on the RIGHT
+    this->m_playerViewport = glm::ivec4(halfW, 0, w - halfW, h);
 }
 void MyCameraManager::teleport(const int idx) {
 	auto tele = [](INANOA::MyCamera* godCamera, INANOA::MyCamera* playerCamera, const glm::vec3& viewOrg, const glm::vec3& lookCenter) {

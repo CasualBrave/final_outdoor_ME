@@ -23,6 +23,24 @@ private:
 	std::vector<DynamicSceneObject*> m_dynamicSOs;
 	TerrainSceneObject* m_terrainSO = nullptr;
 
+	// deferred g-buffer
+	GLuint m_gbufferFBO = 0;
+	GLuint m_gbufferTextures[5] = { 0, 0, 0, 0, 0 }; // pos, normal, ambient, diffuse, specular
+	GLuint m_gbufferDepth = 0;
+
+	// display pass
+	ShaderProgram* m_displayProgram = nullptr;
+	GLint m_displayModeHandle = -1;
+	GLuint m_screenVAO = 0;
+	GLuint m_screenVBO = 0;
+	GLuint m_screenEBO = 0;
+	int m_gbufferDisplayMode = 3; // default diffuse
+	GLint m_displayUVScaleHandle = -1;
+	GLint m_displayUVBiasHandle = -1;
+	int m_curViewportX = 0;
+	int m_curViewportY = 0;
+	int m_curViewportW = 0;
+	int m_curViewportH = 0;
 
 public:
 	void resize(const int w, const int h);
@@ -37,10 +55,16 @@ public:
 // pipeline
 public:
 	void startNewFrame();
-	void renderPass();
+	void renderPass(int gbufferDisplayMode);
+	void setGBufferDisplayMode(int mode) { m_gbufferDisplayMode = mode; }
 
 private:
 	void clear(const glm::vec4 &clearColor = glm::vec4(0.0, 0.0, 0.0, 1.0), const float depth = 1.0);
 	bool setUpShader();
+	bool createGBuffer(const int w, const int h);
+	void destroyGBuffer();
+	bool setUpDisplayShader();
+	void renderGeometryPass();
+	void renderDisplayPass();
+	void ensureScreenQuad();
 };
-

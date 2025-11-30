@@ -8,7 +8,8 @@ DynamicSceneObject::DynamicSceneObject(const int maxNumVertex, const int maxNumI
 	// the data should be INTERLEAF format
 
 	int strideV = 3; // position
-	if (normalFlag == true) { strideV += 3; }
+	if (normalFlag == true) { strideV += 3; } // normal
+	if (normalFlag == true) { strideV += 3; } // tangent
 	if (uvFlag == true) { strideV += 2; } // uv is vec2
 	const int totalBufferDataByte = maxNumVertex * strideV * 4;
 
@@ -37,6 +38,10 @@ DynamicSceneObject::DynamicSceneObject(const int maxNumVertex, const int maxNumI
 		glVertexAttribPointer(SceneManager::Instance()->m_normalHandle, 3, GL_FLOAT, false, strideV * 4, (void*)(byteOffset));
 		byteOffset += 12;
 		glEnableVertexAttribArray(SceneManager::Instance()->m_normalHandle);
+		// tangent follows normal
+		glVertexAttribPointer(SceneManager::Instance()->m_tangentHandle, 3, GL_FLOAT, false, strideV * 4, (void*)(byteOffset));
+		byteOffset += 12;
+		glEnableVertexAttribArray(SceneManager::Instance()->m_tangentHandle);
 	}
 	if (uvFlag) {
 		glVertexAttribPointer(SceneManager::Instance()->m_uvHandle, 2, GL_FLOAT, false, strideV * 4, (void*)(byteOffset));

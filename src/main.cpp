@@ -47,6 +47,7 @@ DynamicSceneObject* m_airplaneSO = nullptr;
 DynamicSceneObject* m_magicStoneSO = nullptr;
 
 bool g_useNormalMap = false;
+int g_gbufferViewMode = 3; // 0:pos,1:normal,2:ambient,3:diffuse,4:specular
 // ==============================================
 
 void resize_impl(int w, int h);
@@ -85,7 +86,8 @@ DynamicSceneObject* createAirplaneSceneObject()
 	const aiScene* scene = importer.ReadFile(modelPath,
 		aiProcess_Triangulate |
 		aiProcess_JoinIdenticalVertices |
-		aiProcess_GenSmoothNormals);
+		aiProcess_GenSmoothNormals |
+		aiProcess_CalcTangentSpace);
 
 	if (scene == nullptr || scene->mNumMeshes == 0) {
 		return nullptr;
@@ -104,14 +106,17 @@ DynamicSceneObject* createAirplaneSceneObject()
 		const aiVector3D& v = mesh->mVertices[i];
 		const aiVector3D uv = hasUV ? mesh->mTextureCoords[0][i] : aiVector3D(0.0f, 0.0f, 0.0f);
 
-		dataBuffer[i * 8 + 0] = v.x;
-		dataBuffer[i * 8 + 1] = v.y;
-		dataBuffer[i * 8 + 2] = v.z;
-		dataBuffer[i * 8 + 3] = mesh->mNormals[i].x;
-		dataBuffer[i * 8 + 4] = mesh->mNormals[i].y;
-		dataBuffer[i * 8 + 5] = mesh->mNormals[i].z;
-		dataBuffer[i * 8 + 6] = uv.x;
-		dataBuffer[i * 8 + 7] = uv.y;
+		dataBuffer[i * 11 + 0] = v.x;
+		dataBuffer[i * 11 + 1] = v.y;
+		dataBuffer[i * 11 + 2] = v.z;
+		dataBuffer[i * 11 + 3] = mesh->mNormals[i].x;
+		dataBuffer[i * 11 + 4] = mesh->mNormals[i].y;
+		dataBuffer[i * 11 + 5] = mesh->mNormals[i].z;
+		dataBuffer[i * 11 + 6] = mesh->mTangents ? mesh->mTangents[i].x : 0.0f;
+		dataBuffer[i * 11 + 7] = mesh->mTangents ? mesh->mTangents[i].y : 0.0f;
+		dataBuffer[i * 11 + 8] = mesh->mTangents ? mesh->mTangents[i].z : 0.0f;
+		dataBuffer[i * 11 + 9] = uv.x;
+		dataBuffer[i * 11 + 10] = uv.y;
 	}
 
 	unsigned int* indexBuffer = airplane->indexBuffer();
@@ -122,7 +127,7 @@ DynamicSceneObject* createAirplaneSceneObject()
 		indexBuffer[f * 3 + 2] = face.mIndices[2];
 	}
 
-	airplane->updateDataBuffer(0, numVertices * 8 * sizeof(float));
+	airplane->updateDataBuffer(0, numVertices * 11 * sizeof(float));
 	airplane->updateIndexBuffer(0, numIndices * sizeof(unsigned int));
 	airplane->setPrimitive(GL_TRIANGLES);
 	airplane->setPixelFunctionId(SceneManager::Instance()->m_fs_texturePass);
@@ -145,7 +150,8 @@ DynamicSceneObject* createMagicStoneSceneObject()
 	const aiScene* scene = importer.ReadFile(modelPath,
 		aiProcess_Triangulate |
 		aiProcess_JoinIdenticalVertices |
-		aiProcess_GenSmoothNormals);
+		aiProcess_GenSmoothNormals |
+		aiProcess_CalcTangentSpace);
 
 	if (scene == nullptr || scene->mNumMeshes == 0) {
 		return nullptr;
@@ -164,14 +170,17 @@ DynamicSceneObject* createMagicStoneSceneObject()
 		const aiVector3D& v = mesh->mVertices[i];
 		const aiVector3D uv = hasUV ? mesh->mTextureCoords[0][i] : aiVector3D(0.0f, 0.0f, 0.0f);
 
-		dataBuffer[i * 8 + 0] = v.x;
-		dataBuffer[i * 8 + 1] = v.y;
-		dataBuffer[i * 8 + 2] = v.z;
-		dataBuffer[i * 8 + 3] = mesh->mNormals[i].x;
-		dataBuffer[i * 8 + 4] = mesh->mNormals[i].y;
-		dataBuffer[i * 8 + 5] = mesh->mNormals[i].z;
-		dataBuffer[i * 8 + 6] = uv.x;
-		dataBuffer[i * 8 + 7] = uv.y;
+		dataBuffer[i * 11 + 0] = v.x;
+		dataBuffer[i * 11 + 1] = v.y;
+		dataBuffer[i * 11 + 2] = v.z;
+		dataBuffer[i * 11 + 3] = mesh->mNormals[i].x;
+		dataBuffer[i * 11 + 4] = mesh->mNormals[i].y;
+		dataBuffer[i * 11 + 5] = mesh->mNormals[i].z;
+		dataBuffer[i * 11 + 6] = mesh->mTangents ? mesh->mTangents[i].x : 0.0f;
+		dataBuffer[i * 11 + 7] = mesh->mTangents ? mesh->mTangents[i].y : 0.0f;
+		dataBuffer[i * 11 + 8] = mesh->mTangents ? mesh->mTangents[i].z : 0.0f;
+		dataBuffer[i * 11 + 9] = uv.x;
+		dataBuffer[i * 11 + 10] = uv.y;
 	}
 
 	unsigned int* indexBuffer = stone->indexBuffer();
@@ -182,7 +191,7 @@ DynamicSceneObject* createMagicStoneSceneObject()
 		indexBuffer[f * 3 + 2] = face.mIndices[2];
 	}
 
-	stone->updateDataBuffer(0, numVertices * 8 * sizeof(float));
+	stone->updateDataBuffer(0, numVertices * 11 * sizeof(float));
 	stone->updateIndexBuffer(0, numIndices * sizeof(unsigned int));
 	stone->setPrimitive(GL_TRIANGLES);
 	stone->setPixelFunctionId(SceneManager::Instance()->m_fs_texturePass);
@@ -426,13 +435,13 @@ inline void on_display()
 	defaultRenderer->setViewport(playerViewport[0], playerViewport[1], playerViewport[2], playerViewport[3]);
 	defaultRenderer->setView(playerVM);
 	defaultRenderer->setProjection(playerProjMat);
-	defaultRenderer->renderPass();
+	defaultRenderer->renderPass(g_gbufferViewMode);
 
 	// rendering with god view
 	defaultRenderer->setViewport(godViewport[0], godViewport[1], godViewport[2], godViewport[3]);
 	defaultRenderer->setView(godVM);
 	defaultRenderer->setProjection(godProjMat);
-	defaultRenderer->renderPass();
+	defaultRenderer->renderPass(g_gbufferViewMode);
 	// ===============================
 }
 
@@ -459,6 +468,12 @@ inline void on_gui()
 	if (ImGui::Checkbox("Enable Magic Normal Map", &g_useNormalMap)) {
     	DynamicSceneObject::setGlobalNormalMapToggle(g_useNormalMap);
 	}
+
+	static const char* gbufferLabels[] = {
+		"World Position", "World Normal", "Ambient", "Diffuse", "Specular"
+	};
+	ImGui::Text("G-Buffer View");
+	ImGui::Combo("Mode", &g_gbufferViewMode, gbufferLabels, IM_ARRAYSIZE(gbufferLabels));
 
 	ImGui::End();
 }
@@ -629,9 +644,6 @@ int main(int, char**)
 		// Rendering
 		on_display();
 		ImGui::Render();
-		int display_w, display_h;
-		glfwGetFramebufferSize(window, &display_w, &display_h);
-		glViewport(0, 0, display_w, display_h);
 		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 		glfwSwapBuffers(window);
 	}
