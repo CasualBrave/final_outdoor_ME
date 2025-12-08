@@ -168,6 +168,9 @@ bool SceneRenderer::setUpDisplayShader() {
 	this->m_displayModeHandle = 5;
 	this->m_displayUVScaleHandle = 6;
 	this->m_displayUVBiasHandle = 7;
+	this->m_displayLightDirHandle = 8;
+	this->m_displayCamPosHandle = 9;
+	this->m_displayViewMatHandle = 10;
 
 	return true;
 }
@@ -330,6 +333,14 @@ void SceneRenderer::renderDisplayPass() {
 	const float uvBiasY  = (this->m_frameHeight > 0) ? (float)this->m_curViewportY / (float)this->m_frameHeight : 0.0f;
 	glUniform2f(this->m_displayUVScaleHandle, uvScaleX, uvScaleY);
 	glUniform2f(this->m_displayUVBiasHandle, uvBiasX, uvBiasY);
+
+	// light & camera for default lighting view
+	const glm::vec3 lightDirWorld = glm::normalize(glm::vec3(0.4f, 0.5f, 0.8f));
+	glm::mat4 invView = glm::inverse(this->m_viewMat);
+	glm::vec3 camPos = glm::vec3(invView[3]);
+	glUniform3fv(this->m_displayLightDirHandle, 1, glm::value_ptr(lightDirWorld));
+	glUniform3fv(this->m_displayCamPosHandle, 1, glm::value_ptr(camPos));
+	glUniformMatrix4fv(this->m_displayViewMatHandle, 1, GL_FALSE, glm::value_ptr(this->m_viewMat));
 
 	glBindVertexArray(this->m_screenVAO);
 	glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);

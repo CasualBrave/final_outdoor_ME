@@ -31,10 +31,13 @@ private:
 	// display pass
 	ShaderProgram* m_displayProgram = nullptr;
 	GLint m_displayModeHandle = -1;
+	GLint m_displayLightDirHandle = -1;
+	GLint m_displayCamPosHandle = -1;
+	GLint m_displayViewMatHandle = -1;
 	GLuint m_screenVAO = 0;
 	GLuint m_screenVBO = 0;
 	GLuint m_screenEBO = 0;
-	int m_gbufferDisplayMode = 3; // default diffuse
+	int m_gbufferDisplayMode = 5; // default diffuse (original look)
 	GLint m_displayUVScaleHandle = -1;
 	GLint m_displayUVBiasHandle = -1;
 	int m_curViewportX = 0;

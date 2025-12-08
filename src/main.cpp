@@ -47,7 +47,7 @@ DynamicSceneObject* m_airplaneSO = nullptr;
 DynamicSceneObject* m_magicStoneSO = nullptr;
 
 bool g_useNormalMap = false;
-int g_gbufferViewMode = 3; // 0:pos,1:normal,2:ambient,3:diffuse,4:specular
+int g_gbufferViewMode = 5; // 0:pos,1:normal,2:ambient,3:diffuse,4:specular,5:default
 // ==============================================
 
 void resize_impl(int w, int h);
@@ -470,7 +470,7 @@ inline void on_gui()
 	}
 
 	static const char* gbufferLabels[] = {
-		"World Position", "World Normal", "Ambient", "Diffuse", "Specular"
+		"World Position", "World Normal", "Ambient", "Diffuse", "Specular", "Default"
 	};
 	ImGui::Text("G-Buffer View");
 	ImGui::Combo("Mode", &g_gbufferViewMode, gbufferLabels, IM_ARRAYSIZE(gbufferLabels));
