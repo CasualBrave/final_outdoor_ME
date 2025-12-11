@@ -5,7 +5,36 @@
 #include "SceneManager.h"
 #include "DynamicSceneObject.h"
 #include "terrain\TerrainSceneObject.h"
+#include "MyPoissonSample.h"
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/quaternion.hpp>
+#include <glm/gtc/matrix_access.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
+struct InstanceDataGPU {
+	glm::mat4 model;
+	glm::vec4 sphere; // xyz center (world), w radius
+};
+
+struct InstanceBatch {
+	std::string name;
+	GLuint vao = 0;
+	GLuint vbo = 0;
+	GLuint ebo = 0;
+	GLsizei indexCount = 0;
+	GLuint texture = 0;
+	glm::vec3 materialAmbient = glm::vec3(1.0f);
+	glm::vec3 materialSpecular = glm::vec3(0.0f);
+	float materialShininess = 1.0f;
+
+	GLuint instanceBuffer = 0;
+	GLuint visibleIndexBuffer = 0;
+	GLuint indirectBuffer = 0;
+	uint32_t numInstances = 0;
+	glm::vec3 sphereCenter = glm::vec3(0.0f);
+	float sphereRadius = 1.0f;
+};
 
 class SceneRenderer
 {
@@ -45,6 +74,13 @@ private:
 	int m_curViewportW = 0;
 	int m_curViewportH = 0;
 
+	// gpu-driven instancing
+	std::vector<InstanceBatch> m_instanceBatches;
+	ShaderProgram* m_cullProgram = nullptr;
+	GLint m_cullNumInstancesHandle = -1;
+	GLint m_cullVPHandle = -1;
+	glm::mat4 m_cullVP = glm::mat4(1.0f);
+
 public:
 	void resize(const int w, const int h);
 	bool initialize(const int w, const int h, ShaderProgram* shaderProgram);
@@ -52,6 +88,7 @@ public:
 	void setProjection(const glm::mat4 &proj);
 	void setView(const glm::mat4 &view);
 	void setViewport(const int x, const int y, const int w, const int h);
+	void setCullingVP(const glm::mat4& vp) { m_cullVP = vp; }
 	void appendDynamicSceneObject(DynamicSceneObject *obj);
 	void appendTerrainSceneObject(TerrainSceneObject* tSO);
 
@@ -70,4 +107,9 @@ private:
 	void renderGeometryPass();
 	void renderDisplayPass();
 	void ensureScreenQuad();
+	void setUpInstanceBatches();
+	void renderInstanceBatches();
+	void dispatchCulling(struct InstanceBatch& batch);
+	void updateFrustumPlanes();
+	GLuint loadTexture(const std::string& path);
 };

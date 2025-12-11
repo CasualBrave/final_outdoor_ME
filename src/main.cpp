@@ -429,6 +429,8 @@ inline void on_display()
 	// start rendering
 	// start new frame
 	defaultRenderer->setViewport(0, 0, displayWidth, displayHeight);
+	// culling 以 player VP 為準，共用於雙 viewport
+	defaultRenderer->setCullingVP(playerProjMat * playerVM);
 	defaultRenderer->startNewFrame();
 
 	// rendering with player view		

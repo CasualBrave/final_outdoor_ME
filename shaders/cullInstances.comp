@@ -1,0 +1,55 @@
+#version 430 core
+
+layout(local_size_x = 256) in;
+
+struct InstanceData {
+    mat4 model;
+    vec4 sphere; // xyz center in world, w radius
+};
+
+layout(std430, binding = 0) readonly buffer InstanceBuffer {
+    InstanceData instances[];
+};
+
+layout(std430, binding = 1) buffer VisibleBuffer {
+    uint count;
+    uint indices[];
+};
+
+layout(std430, binding = 2) buffer DrawCommand {
+    uint count;
+    uint instanceCount;
+    uint firstIndex;
+    uint baseVertex;
+    uint baseInstance;
+} drawCmd;
+
+layout(location = 0) uniform uint numInstances;
+layout(location = 1) uniform mat4 vpMat;
+
+bool insideFrustum(vec4 clip, float radius) {
+    float w = clip.w;
+    if (w == 0.0) return false;
+    vec3 ndc = clip.xyz / w;
+    // 粗略用半徑在 NDC 放大判斷（此處忽略透視縮放，以中心判斷為主）
+    float eps = radius * 0.0; // 若要加 margin 可調整
+    return ndc.x >= -1.0 - eps && ndc.x <= 1.0 + eps &&
+           ndc.y >= -1.0 - eps && ndc.y <= 1.0 + eps &&
+           ndc.z >= -1.0 - eps && ndc.z <= 1.0 + eps;
+}
+
+void main(){
+    uint idx = gl_GlobalInvocationID.x;
+    if(idx >= numInstances) return;
+
+    InstanceData inst = instances[idx];
+    vec3 center = inst.sphere.xyz;
+    float radius = inst.sphere.w;
+
+    vec4 clip = vpMat * vec4(center, 1.0);
+    if(!insideFrustum(clip, radius)) return;
+
+    uint writeIdx = atomicAdd(count, 1);
+    indices[writeIdx + 1] = idx; // offset 1 reserved for count
+    atomicAdd(drawCmd.instanceCount, 1);
+}

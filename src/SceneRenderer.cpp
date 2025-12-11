@@ -1,4 +1,8 @@
 #include "SceneRenderer.h"
+#include <stb_image.h>
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
 
 
 SceneRenderer::SceneRenderer()
@@ -17,6 +21,19 @@ SceneRenderer::~SceneRenderer()
 	if (this->m_displayProgram != nullptr) {
 		delete this->m_displayProgram;
 		this->m_displayProgram = nullptr;
+	}
+	if (this->m_cullProgram != nullptr) {
+		delete this->m_cullProgram;
+		this->m_cullProgram = nullptr;
+	}
+	for (auto& b : this->m_instanceBatches) {
+		if (b.instanceBuffer) glDeleteBuffers(1, &b.instanceBuffer);
+		if (b.visibleIndexBuffer) glDeleteBuffers(1, &b.visibleIndexBuffer);
+		if (b.indirectBuffer) glDeleteBuffers(1, &b.indirectBuffer);
+		if (b.vao) glDeleteVertexArrays(1, &b.vao);
+		if (b.vbo) glDeleteBuffers(1, &b.vbo);
+		if (b.ebo) glDeleteBuffers(1, &b.ebo);
+		if (b.texture) glDeleteTextures(1, &b.texture);
 	}
 }
 void SceneRenderer::startNewFrame() {
@@ -49,6 +66,7 @@ bool SceneRenderer::initialize(const int w, const int h, ShaderProgram* shaderPr
 		return false;
 	}
 	this->ensureScreenQuad();
+	this->setUpInstanceBatches();
 	
 	glEnable(GL_DEPTH_TEST);
 
@@ -131,6 +149,7 @@ bool SceneRenderer::setUpShader(){
 	manager->m_vs_vertexProcessIdHandle = 1;
 	manager->m_vs_commonProcess = 0;
 	manager->m_vs_terrainProcess = 3;
+	manager->m_vs_instanceProcess = 4;
 
 	manager->m_fs_pixelProcessIdHandle = 2;
 	manager->m_fs_pureColor = 5;
@@ -173,6 +192,224 @@ bool SceneRenderer::setUpDisplayShader() {
 	this->m_displayViewMatHandle = 10;
 
 	return true;
+}
+
+GLuint SceneRenderer::loadTexture(const std::string& path) {
+	int w=0,h=0,ch=0;
+	stbi_set_flip_vertically_on_load(true);
+	unsigned char* data = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+	if(!data || w<=0 || h<=0){
+		return 0;
+	}
+	GLuint tex=0;
+	glGenTextures(1,&tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,w,h,0,GL_RGBA,GL_UNSIGNED_BYTE,data);
+	glGenerateMipmap(GL_TEXTURE_2D);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	glBindTexture(GL_TEXTURE_2D,0);
+	stbi_image_free(data);
+	return tex;
+}
+
+void SceneRenderer::setUpInstanceBatches() {
+	// build compute shader for culling
+	Shader* cs = new Shader(GL_COMPUTE_SHADER);
+	cs->createShaderFromFile("shaders\\cullInstances.comp");
+	this->m_cullProgram = new ShaderProgram();
+	this->m_cullProgram->init();
+	this->m_cullProgram->attachShader(cs);
+	this->m_cullProgram->checkStatus();
+	this->m_cullProgram->linkProgram();
+	cs->releaseShader();
+	delete cs;
+	this->m_cullProgram->useProgram();
+	this->m_cullNumInstancesHandle = 0;
+	this->m_cullVPHandle = 1;
+
+	auto createBatch = [&](const std::string& name,
+		const std::string& objPath,
+		const std::string& texPath,
+		const std::string& samplePath,
+		const glm::vec3& sphereCenterOS,
+		float sphereRadiusOS,
+		const glm::vec3& ambient,
+		const glm::vec3& specular,
+		float shininess) {
+			InstanceBatch batch;
+			batch.name = name;
+			batch.materialAmbient = ambient;
+			batch.materialSpecular = specular;
+			batch.materialShininess = shininess;
+
+			Assimp::Importer importer;
+			const aiScene* scene = importer.ReadFile(objPath,
+				aiProcess_Triangulate |
+				aiProcess_JoinIdenticalVertices |
+				aiProcess_GenSmoothNormals |
+				aiProcess_CalcTangentSpace);
+			if(!scene || scene->mNumMeshes==0){ return; }
+			const aiMesh* mesh = scene->mMeshes[0];
+			bool hasUV = mesh->HasTextureCoords(0);
+			int numVertices = (int)mesh->mNumVertices;
+			int numIndices = (int)mesh->mNumFaces * 3;
+			std::vector<float> vertices(numVertices * 11);
+			for(unsigned int i=0;i<mesh->mNumVertices;i++){
+				const aiVector3D& v = mesh->mVertices[i];
+				const aiVector3D uv = hasUV ? mesh->mTextureCoords[0][i] : aiVector3D(0,0,0);
+				vertices[i*11+0]=v.x; vertices[i*11+1]=v.y; vertices[i*11+2]=v.z;
+				vertices[i*11+3]=mesh->mNormals[i].x; vertices[i*11+4]=mesh->mNormals[i].y; vertices[i*11+5]=mesh->mNormals[i].z;
+				vertices[i*11+6]=mesh->mTangents ? mesh->mTangents[i].x : 0.0f;
+				vertices[i*11+7]=mesh->mTangents ? mesh->mTangents[i].y : 0.0f;
+				vertices[i*11+8]=mesh->mTangents ? mesh->mTangents[i].z : 0.0f;
+				vertices[i*11+9]=uv.x; vertices[i*11+10]=uv.y;
+			}
+			std::vector<unsigned int> indices(numIndices);
+			for(unsigned int f=0; f<mesh->mNumFaces; f++){
+				const aiFace& face = mesh->mFaces[f];
+				indices[f*3+0]=face.mIndices[0];
+				indices[f*3+1]=face.mIndices[1];
+				indices[f*3+2]=face.mIndices[2];
+			}
+			glGenVertexArrays(1,&batch.vao);
+			glGenBuffers(1,&batch.vbo);
+			glGenBuffers(1,&batch.ebo);
+			glBindVertexArray(batch.vao);
+			glBindBuffer(GL_ARRAY_BUFFER,batch.vbo);
+			glBufferData(GL_ARRAY_BUFFER, vertices.size()*sizeof(float), vertices.data(), GL_STATIC_DRAW);
+			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,batch.ebo);
+			glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size()*sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+			int stride = 11*sizeof(float);
+			glVertexAttribPointer(SceneManager::Instance()->m_vertexHandle,3,GL_FLOAT,GL_FALSE,stride,(void*)0);
+			glEnableVertexAttribArray(SceneManager::Instance()->m_vertexHandle);
+			glVertexAttribPointer(SceneManager::Instance()->m_normalHandle,3,GL_FLOAT,GL_FALSE,stride,(void*)(3*sizeof(float)));
+			glEnableVertexAttribArray(SceneManager::Instance()->m_normalHandle);
+			glVertexAttribPointer(SceneManager::Instance()->m_tangentHandle,3,GL_FLOAT,GL_FALSE,stride,(void*)(6*sizeof(float)));
+			glEnableVertexAttribArray(SceneManager::Instance()->m_tangentHandle);
+			glVertexAttribPointer(SceneManager::Instance()->m_uvHandle,2,GL_FLOAT,GL_FALSE,stride,(void*)(9*sizeof(float)));
+			glEnableVertexAttribArray(SceneManager::Instance()->m_uvHandle);
+			glBindVertexArray(0);
+			batch.indexCount = numIndices;
+			if(!texPath.empty()){
+				batch.texture = loadTexture(texPath);
+			}
+
+			MyPoissonSample* sample = MyPoissonSample::fromFile(samplePath);
+			batch.numInstances = sample->m_numSample;
+
+			std::vector<InstanceDataGPU> instanceData(batch.numInstances);
+			for(int i=0;i<batch.numInstances;i++){
+				glm::vec3 pos(
+					sample->m_positions[i*3+0],
+					sample->m_positions[i*3+1],
+					sample->m_positions[i*3+2]);
+				glm::vec3 rad(
+					sample->m_radians[i*3+0],
+					sample->m_radians[i*3+1],
+					sample->m_radians[i*3+2]);
+				glm::quat q = glm::quat(rad);
+				glm::mat4 model = glm::translate(glm::mat4(1.0f), pos) * glm::toMat4(q);
+				instanceData[i].model = model;
+				glm::vec3 worldCenter = glm::vec3(model * glm::vec4(sphereCenterOS,1.0f));
+				instanceData[i].sphere = glm::vec4(worldCenter, sphereRadiusOS);
+			}
+			glCreateBuffers(1,&batch.instanceBuffer);
+			glNamedBufferData(batch.instanceBuffer, instanceData.size()*sizeof(InstanceDataGPU), instanceData.data(), GL_STATIC_DRAW);
+
+			glCreateBuffers(1,&batch.visibleIndexBuffer);
+			size_t visSize = (size_t)(batch.numInstances + 1) * sizeof(uint32_t);
+			glNamedBufferData(batch.visibleIndexBuffer, visSize, nullptr, GL_DYNAMIC_DRAW);
+
+			struct DrawCmd { uint32_t count, instanceCount, firstIndex, baseVertex, baseInstance; };
+			DrawCmd cmd = { (uint32_t)batch.indexCount, 0u, 0u, 0u, 0u };
+			glCreateBuffers(1,&batch.indirectBuffer);
+			glNamedBufferData(batch.indirectBuffer, sizeof(DrawCmd), &cmd, GL_DYNAMIC_DRAW);
+
+			delete sample;
+			this->m_instanceBatches.push_back(batch);
+	};
+
+	createBatch("grassB",
+		"assets\\outdoor\\grassB.obj",
+		"assets\\outdoor\\grassB_albedo.png",
+		"assets\\outdoor\\poissonPoints_621043_after.ppd2",
+		glm::vec3(0.0f,0.66f,0.0f), 1.4f,
+		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f);
+
+	createBatch("bush01",
+		"assets\\outdoor\\bush01_lod2.obj",
+		"assets\\outdoor\\bush01.png",
+		"assets\\outdoor\\poissonPoints_1010.ppd2",
+		glm::vec3(0.0f,2.55f,0.0f), 3.4f,
+		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f);
+
+	createBatch("bush05",
+		"assets\\outdoor\\bush05_lod2.obj",
+		"assets\\outdoor\\bush05.png",
+		"assets\\outdoor\\poissonPoints_2797.ppd2",
+		glm::vec3(0.0f,1.76f,0.0f), 2.6f,
+		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f);
+
+	createBatch("buildingV2",
+		"assets\\outdoor\\Medieval_Building_LowPoly\\medieval_building_lowpoly_2.obj",
+		"assets\\outdoor\\Medieval_Building_LowPoly\\Medieval_Building_LowPoly_V2_Albedo_small.png",
+		"assets\\outdoor\\cityLots_sub_0.ppd2",
+		glm::vec3(0.0f,4.57f,0.0f), 8.5f,
+		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f);
+
+	createBatch("buildingV1",
+		"assets\\outdoor\\Medieval_Building_LowPoly\\medieval_building_lowpoly_1.obj",
+		"assets\\outdoor\\Medieval_Building_LowPoly\\Medieval_Building_LowPoly_V1_Albedo_small.png",
+		"assets\\outdoor\\cityLots_sub_1.ppd2",
+		glm::vec3(0.0f,4.57f,0.0f), 10.2f,
+		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f);
+}
+
+void SceneRenderer::dispatchCulling(InstanceBatch& batch){
+	if(batch.numInstances == 0) return;
+	// reset counters
+	uint32_t zero = 0;
+	glClearNamedBufferSubData(batch.visibleIndexBuffer, GL_R32UI, 0, sizeof(uint32_t), GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
+	glClearNamedBufferSubData(batch.indirectBuffer, GL_R32UI, sizeof(uint32_t), sizeof(uint32_t), GL_RED_INTEGER, GL_UNSIGNED_INT, &zero); // instanceCount to 0
+
+	this->m_cullProgram->useProgram();
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, batch.instanceBuffer);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, batch.visibleIndexBuffer);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, batch.indirectBuffer);
+	glUniform1ui(this->m_cullNumInstancesHandle, batch.numInstances);
+	glUniformMatrix4fv(this->m_cullVPHandle, 1, GL_FALSE, glm::value_ptr(this->m_cullVP));
+
+	uint32_t groupSize = 256;
+	uint32_t numGroup = (batch.numInstances + groupSize - 1) / groupSize;
+	glDispatchCompute(numGroup, 1, 1);
+	glMemoryBarrier(GL_COMMAND_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+void SceneRenderer::renderInstanceBatches(){
+	if(this->m_instanceBatches.empty()) return;
+	SceneManager* manager = SceneManager::Instance();
+	for(auto& batch : this->m_instanceBatches){
+		this->dispatchCulling(batch);
+		this->m_shaderProgram->useProgram();
+		glBindVertexArray(batch.vao);
+		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, batch.instanceBuffer);
+		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, batch.visibleIndexBuffer);
+		if(batch.texture){
+			glActiveTexture(manager->m_albedoTexUnit);
+			glBindTexture(GL_TEXTURE_2D, batch.texture);
+		}
+		glUniform1i(manager->m_fs_pixelProcessIdHandle, manager->m_fs_texturePass);
+		glUniform1i(manager->m_vs_vertexProcessIdHandle, manager->m_vs_instanceProcess);
+		glUniform3fv(manager->m_materialAmbientHandle,1,glm::value_ptr(batch.materialAmbient));
+		glUniform3fv(manager->m_materialSpecularHandle,1,glm::value_ptr(batch.materialSpecular));
+		glUniform1f(manager->m_materialShininessHandle,batch.materialShininess);
+		glBindBuffer(GL_DRAW_INDIRECT_BUFFER, batch.indirectBuffer);
+		glDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, 0);
+	}
+	glBindVertexArray(0);
 }
 
 bool SceneRenderer::createGBuffer(const int w, const int h) {
@@ -279,6 +516,8 @@ void SceneRenderer::renderGeometryPass() {
 			obj->update();
 		}
 	}
+	// gpu-driven instances
+	this->renderInstanceBatches();
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
