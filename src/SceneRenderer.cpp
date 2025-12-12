@@ -1,4 +1,6 @@
 #include "SceneRenderer.h"
+#include "FrustumUtils.h"
+#include <cmath>
 #include <stb_image.h>
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
@@ -39,6 +41,9 @@ SceneRenderer::~SceneRenderer()
 void SceneRenderer::startNewFrame() {
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	this->clear();
+	// allow culling dispatch once per frame
+	this->m_cullDoneThisFrame = false;
+	this->m_hzbBuiltThisFrame = false;
 }
 void SceneRenderer::renderPass(int gbufferDisplayMode){
 	this->m_gbufferDisplayMode = gbufferDisplayMode;
@@ -184,12 +189,15 @@ bool SceneRenderer::setUpDisplayShader() {
 	glUniform1i(2, 2); // gAmbientTex  -> unit2
 	glUniform1i(3, 3); // gDiffuseTex  -> unit3
 	glUniform1i(4, 4); // gSpecularTex -> unit4
+	glUniform1i(11, 5); // depthPyramid -> unit5
 	this->m_displayModeHandle = 5;
 	this->m_displayUVScaleHandle = 6;
 	this->m_displayUVBiasHandle = 7;
 	this->m_displayLightDirHandle = 8;
 	this->m_displayCamPosHandle = 9;
 	this->m_displayViewMatHandle = 10;
+	this->m_displayDepthMipLevelHandle = 12;
+	this->m_displayInvProjHandle = 13;
 
 	return true;
 }
@@ -228,7 +236,7 @@ void SceneRenderer::setUpInstanceBatches() {
 	delete cs;
 	this->m_cullProgram->useProgram();
 	this->m_cullNumInstancesHandle = 0;
-	this->m_cullVPHandle = 1;
+	this->m_cullFrustumHandle = 1;
 
 	auto createBatch = [&](const std::string& name,
 		const std::string& objPath,
@@ -238,12 +246,16 @@ void SceneRenderer::setUpInstanceBatches() {
 		float sphereRadiusOS,
 		const glm::vec3& ambient,
 		const glm::vec3& specular,
-		float shininess) {
+		float shininess,
+		bool useOcclusion,
+		bool isOccluder) {
 			InstanceBatch batch;
 			batch.name = name;
 			batch.materialAmbient = ambient;
 			batch.materialSpecular = specular;
 			batch.materialShininess = shininess;
+			batch.useOcclusion = useOcclusion;
+			batch.isOccluder = isOccluder;
 
 			Assimp::Importer importer;
 			const aiScene* scene = importer.ReadFile(objPath,
@@ -337,35 +349,40 @@ void SceneRenderer::setUpInstanceBatches() {
 		"assets\\outdoor\\grassB_albedo.png",
 		"assets\\outdoor\\poissonPoints_621043_after.ppd2",
 		glm::vec3(0.0f,0.66f,0.0f), 1.4f,
-		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f);
+		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f,
+		true, false);
 
 	createBatch("bush01",
 		"assets\\outdoor\\bush01_lod2.obj",
 		"assets\\outdoor\\bush01.png",
 		"assets\\outdoor\\poissonPoints_1010.ppd2",
 		glm::vec3(0.0f,2.55f,0.0f), 3.4f,
-		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f);
+		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f,
+		true, false);
 
 	createBatch("bush05",
 		"assets\\outdoor\\bush05_lod2.obj",
 		"assets\\outdoor\\bush05.png",
 		"assets\\outdoor\\poissonPoints_2797.ppd2",
 		glm::vec3(0.0f,1.76f,0.0f), 2.6f,
-		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f);
+		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f,
+		true, false);
 
 	createBatch("buildingV2",
 		"assets\\outdoor\\Medieval_Building_LowPoly\\medieval_building_lowpoly_2.obj",
 		"assets\\outdoor\\Medieval_Building_LowPoly\\Medieval_Building_LowPoly_V2_Albedo_small.png",
 		"assets\\outdoor\\cityLots_sub_0.ppd2",
 		glm::vec3(0.0f,4.57f,0.0f), 8.5f,
-		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f);
+		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f,
+		false, true);
 
 	createBatch("buildingV1",
 		"assets\\outdoor\\Medieval_Building_LowPoly\\medieval_building_lowpoly_1.obj",
 		"assets\\outdoor\\Medieval_Building_LowPoly\\Medieval_Building_LowPoly_V1_Albedo_small.png",
 		"assets\\outdoor\\cityLots_sub_1.ppd2",
 		glm::vec3(0.0f,4.57f,0.0f), 10.2f,
-		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f);
+		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f,
+		false, true);
 }
 
 void SceneRenderer::dispatchCulling(InstanceBatch& batch){
@@ -380,7 +397,22 @@ void SceneRenderer::dispatchCulling(InstanceBatch& batch){
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, batch.visibleIndexBuffer);
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, batch.indirectBuffer);
 	glUniform1ui(this->m_cullNumInstancesHandle, batch.numInstances);
-	glUniformMatrix4fv(this->m_cullVPHandle, 1, GL_FALSE, glm::value_ptr(this->m_cullVP));
+	if (this->m_hasCullPlanesOverride) {
+		glUniform4fv(this->m_cullFrustumHandle, 6, glm::value_ptr(this->m_cullPlanesOverride[0]));
+	} else {
+		extractFrustumPlanes(this->m_cullVP, this->m_frustumPlanes);
+		glUniform4fv(this->m_cullFrustumHandle, 6, glm::value_ptr(this->m_frustumPlanes[0]));
+	}
+	// occlusion uniforms
+	glUniform1i(9, batch.useOcclusion ? 1 : 0);
+	glUniform1i(10, this->m_depthFixedLevel);
+	glUniformMatrix4fv(11, 1, GL_FALSE, glm::value_ptr(this->m_cullVP));
+	glUniform2f(15, (float)this->m_frameWidth, (float)this->m_frameHeight);
+	// bind depth pyramid on unit 5
+	if (this->m_gbufferDepthTex != 0) {
+		glActiveTexture(GL_TEXTURE5);
+		glBindTexture(GL_TEXTURE_2D, this->m_gbufferDepthTex);
+	}
 
 	uint32_t groupSize = 256;
 	uint32_t numGroup = (batch.numInstances + groupSize - 1) / groupSize;
@@ -388,10 +420,12 @@ void SceneRenderer::dispatchCulling(InstanceBatch& batch){
 	glMemoryBarrier(GL_COMMAND_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
-void SceneRenderer::renderInstanceBatches(){
+void SceneRenderer::renderInstanceBatches(bool foliageOnly){
 	if(this->m_instanceBatches.empty()) return;
 	SceneManager* manager = SceneManager::Instance();
 	for(auto& batch : this->m_instanceBatches){
+		if (foliageOnly && !batch.useOcclusion) continue;
+		if (!foliageOnly && !batch.isOccluder) continue;
 		this->dispatchCulling(batch);
 		this->m_shaderProgram->useProgram();
 		glBindVertexArray(batch.vao);
@@ -445,11 +479,20 @@ bool SceneRenderer::createGBuffer(const int w, const int h) {
 		glFramebufferTexture2D(GL_FRAMEBUFFER, attachments[i], GL_TEXTURE_2D, this->m_gbufferTextures[i], 0);
 	}
 
-	// depth buffer
-	glGenRenderbuffers(1, &this->m_gbufferDepth);
-	glBindRenderbuffer(GL_RENDERBUFFER, this->m_gbufferDepth);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, this->m_gbufferDepth);
+	// depth texture (player viewport size) for HZB
+	glGenTextures(1, &this->m_gbufferDepthTex);
+	glBindTexture(GL_TEXTURE_2D, this->m_gbufferDepthTex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, w, h, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, this->m_gbufferDepthTex, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	int maxDim = (w > h) ? w : h;
+	this->m_depthNumLevels = (int)std::floor(std::log2((float)maxDim)) + 1;
+	this->m_depthFixedLevel = (int)std::ceil(this->m_depthNumLevels * 0.5f);
 
 	glDrawBuffers(5, attachments);
 	const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
@@ -459,9 +502,9 @@ bool SceneRenderer::createGBuffer(const int w, const int h) {
 }
 
 void SceneRenderer::destroyGBuffer() {
-	if (this->m_gbufferDepth != 0) {
-		glDeleteRenderbuffers(1, &this->m_gbufferDepth);
-		this->m_gbufferDepth = 0;
+	if (this->m_gbufferDepthTex != 0) {
+		glDeleteTextures(1, &this->m_gbufferDepthTex);
+		this->m_gbufferDepthTex = 0;
 	}
 	for (int i = 0; i < 5; ++i) {
 		if (this->m_gbufferTextures[i] != 0) {
@@ -497,13 +540,14 @@ void SceneRenderer::renderGeometryPass() {
 	this->m_shaderProgram->useProgram();
 	glUniformMatrix4fv(manager->m_projMatHandle, 1, false, glm::value_ptr(this->m_projMat));
 	glUniformMatrix4fv(manager->m_viewMatHandle, 1, false, glm::value_ptr(this->m_viewMat));
+	// culling VP is provided externally via setCullingVP (player frustum)
+	glm::mat4 invView = glm::inverse(this->m_viewMat);
+	this->m_cullCamPos = glm::vec3(invView[3]);
+
 	// directional light in world space
 	const glm::vec3 lightDirWorld = glm::normalize(glm::vec3(0.4f, 0.5f, 0.8f));
 	glUniform3fv(manager->m_lightDirWorldHandle, 1, glm::value_ptr(lightDirWorld));
-	// camera position in world (inverse of viewMat)
-	glm::mat4 invView = glm::inverse(this->m_viewMat);
-	glm::vec3 camPos = glm::vec3(invView[3]);
-	glUniform3fv(manager->m_cameraPosHandle, 1, glm::value_ptr(camPos));
+	glUniform3fv(manager->m_cameraPosHandle, 1, glm::value_ptr(this->m_cullCamPos));
 
 	if (this->m_terrainSO != nullptr) {
 		glUniform1i(SceneManager::Instance()->m_vs_vertexProcessIdHandle, SceneManager::Instance()->m_vs_terrainProcess);
@@ -516,8 +560,19 @@ void SceneRenderer::renderGeometryPass() {
 			obj->update();
 		}
 	}
-	// gpu-driven instances
-	this->renderInstanceBatches();
+	// pass 1: occluder instances only (buildings)
+	this->renderInstanceBatches(false);
+
+	// build HZB once per frame from player pass depth
+	if (!this->m_hzbBuiltThisFrame && this->m_gbufferDepthTex != 0) {
+		glBindTexture(GL_TEXTURE_2D, this->m_gbufferDepthTex);
+		glGenerateMipmap(GL_TEXTURE_2D);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		this->m_hzbBuiltThisFrame = true;
+	}
+
+	// pass 2: foliage instances with occlusion culling
+	this->renderInstanceBatches(true);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -564,8 +619,13 @@ void SceneRenderer::renderDisplayPass() {
 	glBindTexture(GL_TEXTURE_2D, this->m_gbufferTextures[3]);
 	glActiveTexture(GL_TEXTURE4);
 	glBindTexture(GL_TEXTURE_2D, this->m_gbufferTextures[4]);
+	glActiveTexture(GL_TEXTURE5);
+	glBindTexture(GL_TEXTURE_2D, this->m_gbufferDepthTex);
 
 	glUniform1i(this->m_displayModeHandle, this->m_gbufferDisplayMode);
+	glUniform1i(this->m_displayDepthMipLevelHandle, this->m_depthDisplayLevel);
+	glm::mat4 invProj = glm::inverse(this->m_projMat);
+	glUniformMatrix4fv(this->m_displayInvProjHandle, 1, GL_FALSE, glm::value_ptr(invProj));
 	const float uvScaleX = (this->m_frameWidth  > 0) ? (float)this->m_curViewportW / (float)this->m_frameWidth  : 1.0f;
 	const float uvScaleY = (this->m_frameHeight > 0) ? (float)this->m_curViewportH / (float)this->m_frameHeight : 1.0f;
 	const float uvBiasX  = (this->m_frameWidth  > 0) ? (float)this->m_curViewportX / (float)this->m_frameWidth  : 0.0f;

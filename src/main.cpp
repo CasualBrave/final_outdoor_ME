@@ -19,6 +19,7 @@
 #include "Shader.h"
 #include "SceneRenderer.h"
 #include "MyImGuiPanel.h"
+#include "FrustumUtils.h"
 
 #include "ViewFrustumSceneObject.h"
 #include "DynamicSceneObject.h"
@@ -421,8 +422,48 @@ inline void on_display()
 	// update player camera view frustum
 	m_viewFrustumSO->updateState(playerVM, playerViewOrg);
 
-	// update geography
-	m_terrain->updateState(playerVM, playerViewOrg, playerProjMat, nullptr);
+	// build frustum planes from the red frustum corners (camera-space clip corners)
+	const float nearDepth = 0.1f;
+	const float farDepth = m_myCameraManager->playerCameraFar();
+	const glm::mat4 tView = glm::lookAt(glm::vec3(0.0, 0.0, -1.0),
+		glm::vec3(0.0, 0.0, 0.0),
+		glm::vec3(0.0, 1.0, 0.0));
+	float clipCorners[2 * 12]; // near + far, 4 corners each
+	std::vector<float> depths = { nearDepth, farDepth };
+	viewFrustumMultiClipCorner(depths, tView, playerProjMat, clipCorners);
+
+	// camera model matrix (same basis as ViewFrustumSceneObject::updateState)
+	glm::mat4 viewT = glm::transpose(playerVM);
+	glm::vec4 forward = -1.0f * glm::vec4(viewT[2].x, viewT[2].y, viewT[2].z, 0.0);
+	glm::vec4 xAxis = -1.0f * glm::vec4(viewT[0].x, viewT[0].y, viewT[0].z, 0.0);
+	glm::vec4 yAxis = glm::vec4(viewT[1].x, viewT[1].y, viewT[1].z, 0.0);
+	glm::mat4 rMat(1.0f);
+	rMat[0] = xAxis;
+	rMat[1] = yAxis;
+	rMat[2] = forward;
+	glm::mat4 frustumModel = glm::translate(playerViewOrg) * rMat;
+
+	glm::vec3 nearCornersWS[4];
+	glm::vec3 farCornersWS[4];
+	for (int i = 0; i < 4; ++i) {
+		glm::vec3 localNear(
+			clipCorners[0 * 12 + i * 3 + 0],
+			clipCorners[0 * 12 + i * 3 + 1],
+			clipCorners[0 * 12 + i * 3 + 2]);
+		glm::vec3 localFar(
+			clipCorners[1 * 12 + i * 3 + 0],
+			clipCorners[1 * 12 + i * 3 + 1],
+			clipCorners[1 * 12 + i * 3 + 2]);
+		nearCornersWS[i] = glm::vec3(frustumModel * glm::vec4(localNear, 1.0f));
+		farCornersWS[i] = glm::vec3(frustumModel * glm::vec4(localFar, 1.0f));
+	}
+
+	glm::vec4 planes[6];
+	extractFrustumPlanesFromCorners(nearCornersWS, farCornersWS, planes);
+	defaultRenderer->setCullingPlanes(planes);
+
+	// update geography with the same planes
+	m_terrain->updateState(playerVM, playerViewOrg, playerProjMat, planes);
 	// =============================================
 
 	// =============================================
@@ -472,10 +513,17 @@ inline void on_gui()
 	}
 
 	static const char* gbufferLabels[] = {
-		"World Position", "World Normal", "Ambient", "Diffuse", "Specular", "Default"
+		"World Position", "World Normal", "Ambient", "Diffuse", "Specular", "Default", "Depth Mip"
 	};
 	ImGui::Text("G-Buffer View");
 	ImGui::Combo("Mode", &g_gbufferViewMode, gbufferLabels, IM_ARRAYSIZE(gbufferLabels));
+	if (g_gbufferViewMode == 6) {
+		int lvl = m_imguiPanel->depthMipLevel();
+		if (ImGui::SliderInt("Mip Level", &lvl, 0, 12)) {
+			m_imguiPanel->setDepthMipLevel(lvl);
+		}
+		defaultRenderer->setDepthDisplayLevel(lvl);
+	}
 
 	ImGui::End();
 }

@@ -50,6 +50,10 @@ void terrainPass(){
 
 void texturePass(){
     vec3 texel  = texture(albedoTexture, f_uv).rgb;
+    float alpha = texture(albedoTexture, f_uv).a;
+    if(alpha < 0.5){
+        discard; // foliage / alpha cutout
+    }
     vec3 N = computeWorldNormal();
     writeGBuffer(texel, N);
 }

@@ -12,6 +12,7 @@ out vec3 f_eyeDirTS;      // tangent-space view direction
 out vec3 f_normalWS;      // world-space normal (vertex)
 out vec3 f_tangentWS;     // world-space tangent
 out vec3 f_bitangentWS;   // world-space bitangent
+out flat uint f_instanceVisibleIdx;
 
 layout(location = 0) uniform mat4 modelMat;
 layout(location = 5) uniform sampler2D elevationMap;
@@ -22,6 +23,21 @@ layout(location = 9) uniform mat4 terrainVToUVMat;
 layout(location = 1) uniform int vertexProcessIdx;
 layout(location = 17) uniform vec3 lightDirWorld;
 layout(location = 18) uniform vec3 cameraPosWorld;
+
+// GPU-driven instancing buffers
+struct InstanceData {
+    mat4 model;
+    vec4 sphere;
+};
+
+layout(std430, binding = 0) readonly buffer InstanceBuffer {
+    InstanceData instances[];
+};
+
+layout(std430, binding = 1) readonly buffer VisibleBuffer {
+    uint count;
+    uint indices[];
+};
 
 // ========== 動態物件（飛機、石頭等） ==========
 void commonProcess(){
@@ -94,12 +110,42 @@ void terrainProcess(){
     gl_Position = projMat * viewVertex;
 }
 
+void instanceProcess(){
+    // fetch visible index (visible buffer has count at slot 0)
+    uint visibleIdx = indices[gl_InstanceID + 1u];
+    InstanceData inst = instances[visibleIdx];
+    mat4 m = inst.model;
+
+    mat3 normalMat = transpose(inverse(mat3(m)));
+    vec3 T = normalize(normalMat * v_tangent);
+    vec3 N = normalize(normalMat * v_normal);
+    vec3 B = normalize(cross(N, T));
+
+    vec4 worldVertex = m * vec4(v_vertex, 1.0);
+    f_worldPos = worldVertex.xyz;
+    f_uv       = v_uv;
+    f_normalWS   = N;
+    f_tangentWS  = T;
+    f_bitangentWS = B;
+    f_instanceVisibleIdx = visibleIdx;
+
+    vec3 L = normalize(lightDirWorld);
+    vec3 V = normalize(cameraPosWorld - f_worldPos);
+    f_lightDirTS = vec3(dot(L, T), dot(L, B), dot(L, N));
+    f_eyeDirTS   = vec3(dot(V, T), dot(V, B), dot(V, N));
+
+    gl_Position = projMat * (viewMat * worldVertex);
+}
+
 void main(){
     if(vertexProcessIdx == 0){
         commonProcess();
     }
     else if(vertexProcessIdx == 3){
         terrainProcess();
+    }
+    else if(vertexProcessIdx == 4){
+        instanceProcess();
     }
     else{
         commonProcess();

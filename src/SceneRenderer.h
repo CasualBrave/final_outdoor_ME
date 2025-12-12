@@ -34,6 +34,8 @@ struct InstanceBatch {
 	uint32_t numInstances = 0;
 	glm::vec3 sphereCenter = glm::vec3(0.0f);
 	float sphereRadius = 1.0f;
+	bool useOcclusion = false; // foliage only
+	bool isOccluder = false;   // rendered before HZB build
 };
 
 class SceneRenderer
@@ -55,7 +57,10 @@ private:
 	// deferred g-buffer
 	GLuint m_gbufferFBO = 0;
 	GLuint m_gbufferTextures[5] = { 0, 0, 0, 0, 0 }; // pos, normal, ambient, diffuse, specular
-	GLuint m_gbufferDepth = 0;
+	GLuint m_gbufferDepthTex = 0; // depth texture for HZB
+	int m_depthNumLevels = 1;
+	int m_depthFixedLevel = 0;
+	bool m_hzbBuiltThisFrame = false;
 
 	// display pass
 	ShaderProgram* m_displayProgram = nullptr;
@@ -63,10 +68,13 @@ private:
 	GLint m_displayLightDirHandle = -1;
 	GLint m_displayCamPosHandle = -1;
 	GLint m_displayViewMatHandle = -1;
+	GLint m_displayDepthMipLevelHandle = -1;
+	GLint m_displayInvProjHandle = -1;
 	GLuint m_screenVAO = 0;
 	GLuint m_screenVBO = 0;
 	GLuint m_screenEBO = 0;
 	int m_gbufferDisplayMode = 5; // default diffuse (original look)
+	int m_depthDisplayLevel = 0;
 	GLint m_displayUVScaleHandle = -1;
 	GLint m_displayUVBiasHandle = -1;
 	int m_curViewportX = 0;
@@ -78,8 +86,13 @@ private:
 	std::vector<InstanceBatch> m_instanceBatches;
 	ShaderProgram* m_cullProgram = nullptr;
 	GLint m_cullNumInstancesHandle = -1;
-	GLint m_cullVPHandle = -1;
+	GLint m_cullFrustumHandle = -1;
 	glm::mat4 m_cullVP = glm::mat4(1.0f);
+	glm::vec4 m_frustumPlanes[6];
+	glm::vec4 m_cullPlanesOverride[6];
+	bool m_hasCullPlanesOverride = false;
+	glm::vec3 m_cullCamPos = glm::vec3(0.0f);
+	bool m_cullDoneThisFrame = false;
 
 public:
 	void resize(const int w, const int h);
@@ -89,6 +102,12 @@ public:
 	void setView(const glm::mat4 &view);
 	void setViewport(const int x, const int y, const int w, const int h);
 	void setCullingVP(const glm::mat4& vp) { m_cullVP = vp; }
+	void setCullingPlanes(const glm::vec4 planes[6]) {
+		for (int i = 0; i < 6; ++i) m_cullPlanesOverride[i] = planes[i];
+		m_hasCullPlanesOverride = true;
+	}
+	void clearCullingPlanesOverride() { m_hasCullPlanesOverride = false; }
+	void setDepthDisplayLevel(const int level) { m_depthDisplayLevel = level; }
 	void appendDynamicSceneObject(DynamicSceneObject *obj);
 	void appendTerrainSceneObject(TerrainSceneObject* tSO);
 
@@ -108,8 +127,7 @@ private:
 	void renderDisplayPass();
 	void ensureScreenQuad();
 	void setUpInstanceBatches();
-	void renderInstanceBatches();
+	void renderInstanceBatches(bool foliageOnly);
 	void dispatchCulling(struct InstanceBatch& batch);
-	void updateFrustumPlanes();
 	GLuint loadTexture(const std::string& path);
 };

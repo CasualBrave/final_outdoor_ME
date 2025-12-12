@@ -54,6 +54,7 @@ public:
 
 	int m_vs_commonProcess = 0;
 	int m_vs_terrainProcess = 0;	
+	int m_vs_instanceProcess = 0;
 	
 	int m_fs_pureColor = 0;	
 	int m_fs_terrainPass = 0;
