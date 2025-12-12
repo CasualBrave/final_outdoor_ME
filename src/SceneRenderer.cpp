@@ -350,7 +350,7 @@ void SceneRenderer::setUpInstanceBatches() {
 		"assets\\outdoor\\poissonPoints_621043_after.ppd2",
 		glm::vec3(0.0f,0.66f,0.0f), 1.4f,
 		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f,
-		true, false);
+		false, false);
 
 	createBatch("bush01",
 		"assets\\outdoor\\bush01_lod2.obj",
@@ -358,7 +358,7 @@ void SceneRenderer::setUpInstanceBatches() {
 		"assets\\outdoor\\poissonPoints_1010.ppd2",
 		glm::vec3(0.0f,2.55f,0.0f), 3.4f,
 		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f,
-		true, false);
+		false, false);
 
 	createBatch("bush05",
 		"assets\\outdoor\\bush05_lod2.obj",
@@ -366,7 +366,7 @@ void SceneRenderer::setUpInstanceBatches() {
 		"assets\\outdoor\\poissonPoints_2797.ppd2",
 		glm::vec3(0.0f,1.76f,0.0f), 2.6f,
 		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f,
-		true, false);
+		false, false);
 
 	createBatch("buildingV2",
 		"assets\\outdoor\\Medieval_Building_LowPoly\\medieval_building_lowpoly_2.obj",
@@ -424,7 +424,8 @@ void SceneRenderer::renderInstanceBatches(bool foliageOnly){
 	if(this->m_instanceBatches.empty()) return;
 	SceneManager* manager = SceneManager::Instance();
 	for(auto& batch : this->m_instanceBatches){
-		if (foliageOnly && !batch.useOcclusion) continue;
+		// pass split: occluder pass renders occluders; foliage pass renders non-occluders
+		if (foliageOnly && batch.isOccluder) continue;
 		if (!foliageOnly && !batch.isOccluder) continue;
 		this->dispatchCulling(batch);
 		this->m_shaderProgram->useProgram();
