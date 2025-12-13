@@ -65,14 +65,18 @@ void SceneRenderer::renderDisplayOnly(int gbufferDisplayMode) {
 	this->renderDisplayPass();
 }
 
+void SceneRenderer::renderPassReuseVisibility(int gbufferDisplayMode) {
+	this->m_gbufferDisplayMode = gbufferDisplayMode;
+	this->renderGeometryPass(false, false);
+	this->renderDisplayPass();
+}
+
 // =======================================
 void SceneRenderer::resize(const int w, const int h){
 	this->m_frameWidth = w;
 	this->m_frameHeight = h;
 	this->destroyGBuffer();
-	this->destroyDepthPyramid();
 	this->createGBuffer(w, h);
-	this->createDepthPyramid(w, h);
 }
 bool SceneRenderer::initialize(const int w, const int h, ShaderProgram* shaderProgram){
 	this->m_shaderProgram = shaderProgram;
@@ -448,11 +452,14 @@ void SceneRenderer::dispatchCulling(InstanceBatch& batch){
 		glUniform4fv(this->m_cullFrustumHandle, 6, glm::value_ptr(this->m_frustumPlanes[0]));
 	}
 	// occlusion uniforms
-	glUniform1i(9, batch.useOcclusion ? 1 : 0);
-	glUniform1i(10, this->m_depthFixedLevel);
+	glUniform1i(9, (this->m_occlusionEnabled && batch.useOcclusion) ? 1 : 0);
+	int fixedLevel = (this->m_occlusionFixedLevelOverride >= 0) ? this->m_occlusionFixedLevelOverride : (int)std::ceil((float)this->m_occlusionLevels * 0.5f);
+	fixedLevel = std::clamp(fixedLevel, 0, std::max(0, this->m_occlusionLevels - 1));
+	glUniform1i(10, fixedLevel);
 	glUniformMatrix4fv(11, 1, GL_FALSE, glm::value_ptr(this->m_cullVP));
 	glUniformMatrix4fv(12, 1, GL_FALSE, glm::value_ptr(this->m_cullView));
-	glUniform1f(13, 400.0f);
+	glUniform1f(13, this->m_occlusionMaxViewDepth);
+	glUniform1f(14, this->m_occlusionBias);
 	glUniform2f(15, (float)this->m_frameWidth, (float)this->m_frameHeight);
 	// bind depth pyramid on unit 5
 	if (this->m_depthPyramidTex != 0) {
@@ -467,13 +474,19 @@ void SceneRenderer::dispatchCulling(InstanceBatch& batch){
 }
 
 void SceneRenderer::renderInstanceBatches(bool foliageOnly){
+	this->renderInstanceBatches(foliageOnly, true);
+}
+
+void SceneRenderer::renderInstanceBatches(bool foliageOnly, const bool recomputeVisibility){
 	if(this->m_instanceBatches.empty()) return;
 	SceneManager* manager = SceneManager::Instance();
 		for(auto& batch : this->m_instanceBatches){
 			// pass split: occluder pass renders occluders; foliage pass renders non-occluders
 			if (foliageOnly && batch.isOccluder) continue;
 			if (!foliageOnly && !batch.isOccluder) continue;
-			this->dispatchCulling(batch);
+			if (recomputeVisibility) {
+				this->dispatchCulling(batch);
+			}
 			this->m_shaderProgram->useProgram();
 			// Instances never use fragment normal mapping in this project.
 			glUniform1i(manager->m_useNormalMapHandle, 0);
@@ -561,6 +574,9 @@ void SceneRenderer::destroyGBuffer() {
 		glDeleteTextures(1, &this->m_depthPyramidTex);
 		this->m_depthPyramidTex = 0;
 	}
+	this->m_occlusionW = 0;
+	this->m_occlusionH = 0;
+	this->m_occlusionLevels = 1;
 	for (int i = 0; i < 5; ++i) {
 		if (this->m_gbufferTextures[i] != 0) {
 			glDeleteTextures(1, &this->m_gbufferTextures[i]);
@@ -636,6 +652,28 @@ void SceneRenderer::destroyDepthVizPyramid() {
 	}
 }
 
+void SceneRenderer::ensureOcclusionPyramid(const int w, const int h) {
+	if (w <= 0 || h <= 0) return;
+	const int maxDim = (w > h) ? w : h;
+	const int levels = (int)std::floor(std::log2((float)maxDim)) + 1;
+	if (this->m_depthPyramidTex != 0 && this->m_occlusionW == w && this->m_occlusionH == h && this->m_occlusionLevels == levels) {
+		return;
+	}
+	if (this->m_depthPyramidTex != 0) {
+		glDeleteTextures(1, &this->m_depthPyramidTex);
+		this->m_depthPyramidTex = 0;
+	}
+	this->m_occlusionW = w;
+	this->m_occlusionH = h;
+	this->m_occlusionLevels = std::max(1, levels);
+	glCreateTextures(GL_TEXTURE_2D, 1, &this->m_depthPyramidTex);
+	glTextureStorage2D(this->m_depthPyramidTex, this->m_occlusionLevels, GL_R32F, w, h);
+	glTextureParameteri(this->m_depthPyramidTex, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+	glTextureParameteri(this->m_depthPyramidTex, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTextureParameteri(this->m_depthPyramidTex, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(this->m_depthPyramidTex, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
 bool SceneRenderer::setUpDepthVizShader() {
 	Shader* cs = new Shader(GL_COMPUTE_SHADER);
 	cs->createShaderFromFile("shaders\\depthVizBuild.comp");
@@ -708,30 +746,31 @@ void SceneRenderer::destroyDepthPyramid() {
 }
 
 void SceneRenderer::buildDepthPyramid() {
-	if (this->m_hzbProgram == nullptr || this->m_depthPyramidTex == 0 || this->m_gbufferDepthTex == 0) return;
+	// Build viewport-sized occlusion pyramid from the viewport-sized depthVizTex using MIN reduction (nearest depth).
+	if (this->m_hzbProgram == nullptr || this->m_depthPyramidTex == 0 || this->m_depthVizTex == 0) return;
 	this->m_hzbProgram->useProgram();
-	// level 0: copy max from depth texture
+	// level 0: copy from depth texture into R32F target
 	glBindImageTexture(0, this->m_depthPyramidTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
-	glBindTextureUnit(1, this->m_gbufferDepthTex);
+	glBindTextureUnit(1, this->m_depthVizTex);
 	glBindTextureUnit(2, this->m_depthPyramidTex);
 	glUniform1i(this->m_hzbSrcLevelHandle, -1);
 	glUniform1i(this->m_hzbDstLevelHandle, 0);
-	int w = (int)std::ceil((float)this->m_frameWidth / 8.0f);
-	int h = (int)std::ceil((float)this->m_frameHeight / 8.0f);
+	glUniform1i(2, 0); // reduceOp = MIN
+	int w = (int)std::ceil((float)this->m_occlusionW / 8.0f);
+	int h = (int)std::ceil((float)this->m_occlusionH / 8.0f);
 	glDispatchCompute(w, h, 1);
 	glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
 
 	// build remaining levels from pyramid itself
-	int srcW = this->m_frameWidth;
-	int srcH = this->m_frameHeight;
-	for (int level = 1; level < this->m_depthNumLevels; ++level) {
-		srcW = std::max(1, srcW >> 1);
-		srcH = std::max(1, srcH >> 1);
+	int srcW = this->m_occlusionW;
+	int srcH = this->m_occlusionH;
+	for (int level = 1; level < this->m_occlusionLevels; ++level) {
 		int dstW = std::max(1, srcW >> 1);
 		int dstH = std::max(1, srcH >> 1);
 		glBindImageTexture(0, this->m_depthPyramidTex, level, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
 		glUniform1i(this->m_hzbSrcLevelHandle, level - 1);
 		glUniform1i(this->m_hzbDstLevelHandle, level);
+		glUniform1i(2, 0); // reduceOp = MIN
 		int gx = (int)std::ceil((float)dstW / 8.0f);
 		int gy = (int)std::ceil((float)dstH / 8.0f);
 		glDispatchCompute(gx, gy, 1);
@@ -742,6 +781,10 @@ void SceneRenderer::buildDepthPyramid() {
 }
 
 void SceneRenderer::renderGeometryPass() {
+	this->renderGeometryPass(true, true);
+}
+
+void SceneRenderer::renderGeometryPass(const bool recomputeVisibility, const bool buildPyramids) {
 	SceneManager *manager = SceneManager::Instance();	
 
 	glBindFramebuffer(GL_FRAMEBUFFER, this->m_gbufferFBO);
@@ -786,38 +829,49 @@ void SceneRenderer::renderGeometryPass() {
 		}
 	}
 	// pass 1: occluder instances only (buildings)
-	this->renderInstanceBatches(false);
+	this->renderInstanceBatches(false, recomputeVisibility);
 
-	// build depth mipmap for visualization (viewport-sized texture to avoid edge contamination)
-	if (this->m_depthVizEnabled && this->m_gbufferDepthTex != 0) {
-		this->ensureDepthVizTex(this->m_curViewportW, this->m_curViewportH);
-		this->ensureDepthVizPyramid(this->m_curViewportW, this->m_curViewportH);
-		if (this->m_depthVizTex != 0 && this->m_depthVizFBO != 0) {
-			// Blit only the player viewport region to a viewport-sized depth texture, then mipmap that.
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, this->m_gbufferFBO);
-			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, this->m_depthVizFBO);
-			glBlitFramebuffer(
-				this->m_curViewportX, this->m_curViewportY,
-				this->m_curViewportX + this->m_curViewportW, this->m_curViewportY + this->m_curViewportH,
-				0, 0, this->m_curViewportW, this->m_curViewportH,
-				GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-			glBindFramebuffer(GL_FRAMEBUFFER, this->m_gbufferFBO);
-			this->buildDepthVizPyramid();
+	if (buildPyramids) {
+		// build depth mipmap for visualization (viewport-sized texture to avoid edge contamination)
+		bool anyOcclusion = false;
+		for (const auto& b : this->m_instanceBatches) {
+			if (b.useOcclusion) { anyOcclusion = true; break; }
+		}
+		if ((this->m_depthVizEnabled || anyOcclusion) && this->m_gbufferDepthTex != 0) {
+			this->ensureDepthVizTex(this->m_curViewportW, this->m_curViewportH);
+			if (anyOcclusion) {
+				this->ensureOcclusionPyramid(this->m_curViewportW, this->m_curViewportH);
+			}
+			if (this->m_depthVizEnabled) {
+				this->ensureDepthVizPyramid(this->m_curViewportW, this->m_curViewportH);
+			}
+			if (this->m_depthVizTex != 0 && this->m_depthVizFBO != 0) {
+				// Blit only the player viewport region to a viewport-sized depth texture.
+				glBindFramebuffer(GL_READ_FRAMEBUFFER, this->m_gbufferFBO);
+				glBindFramebuffer(GL_DRAW_FRAMEBUFFER, this->m_depthVizFBO);
+				glBlitFramebuffer(
+					this->m_curViewportX, this->m_curViewportY,
+					this->m_curViewportX + this->m_curViewportW, this->m_curViewportY + this->m_curViewportH,
+					0, 0, this->m_curViewportW, this->m_curViewportH,
+					GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+				glBindFramebuffer(GL_FRAMEBUFFER, this->m_gbufferFBO);
+				// Visualization pyramid (MAX) only when requested.
+				if (this->m_depthVizEnabled) {
+					this->buildDepthVizPyramid();
+				}
+				// Occlusion pyramid (MIN = nearest depth) when any foliage uses occlusion.
+				if (anyOcclusion) {
+					this->buildDepthPyramid();
+					this->m_hzbBuiltThisFrame = true;
+				}
+			}
 		}
 	}
 
-	// build HZB once per frame from player pass depth, only if any batch uses occlusion
-	bool anyOcclusion = false;
-	for (const auto& b : this->m_instanceBatches) {
-		if (b.useOcclusion) { anyOcclusion = true; break; }
-	}
-	if (anyOcclusion && !this->m_hzbBuiltThisFrame && this->m_gbufferDepthTex != 0 && this->m_depthPyramidTex != 0) {
-		this->buildDepthPyramid();
-		this->m_hzbBuiltThisFrame = true;
-	}
+	// (Occlusion pyramid is built above from viewport depth.)
 
 	// pass 2: foliage instances with occlusion culling
-	this->renderInstanceBatches(true);
+	this->renderInstanceBatches(true, recomputeVisibility);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 

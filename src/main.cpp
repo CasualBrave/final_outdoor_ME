@@ -52,6 +52,11 @@ int g_gbufferViewMode = 5; // 0:pos,1:normal,2:ambient,3:diffuse,4:specular,5:de
 bool g_depthVizSplit = false;
 int g_depthMipLevel = 0;
 float g_depthVisGamma = 1.0f;
+bool g_occlusionEnabled = true;
+float g_occlusionBias = 0.0005f;
+bool g_occlusionFixedMipOverride = false;
+int g_occlusionFixedMipLevel = 0;
+float g_maxCullDepth = 400.0f;
 // ==============================================
 
 void resize_impl(int w, int h);
@@ -481,8 +486,12 @@ inline void on_display()
 	defaultRenderer->setCullingView(playerVM);
 	defaultRenderer->setDepthVizEnabled(g_depthVizSplit || g_gbufferViewMode == 6);
 	defaultRenderer->setDepthVisFar(playerFar);
-		defaultRenderer->setDepthVisGamma(g_depthVisGamma);
-		defaultRenderer->startNewFrame();
+	defaultRenderer->setDepthVisGamma(g_depthVisGamma);
+	defaultRenderer->setOcclusionEnabled(g_occlusionEnabled);
+	defaultRenderer->setOcclusionBias(g_occlusionBias);
+	defaultRenderer->setOcclusionFixedLevelOverride(g_occlusionFixedMipOverride ? g_occlusionFixedMipLevel : -1);
+	defaultRenderer->setOcclusionMaxViewDepth(g_maxCullDepth);
+	defaultRenderer->startNewFrame();
 
 	// rendering with player view		
 	defaultRenderer->setViewport(playerViewport[0], playerViewport[1], playerViewport[2], playerViewport[3]);
@@ -503,7 +512,8 @@ inline void on_display()
 		// rendering with god view
 		defaultRenderer->setView(godVM);
 		defaultRenderer->setProjection(godProjMat);
-		defaultRenderer->renderPass(g_gbufferViewMode);
+		// God view should visualize the SAME culling result from player view (no recompute tied to god camera).
+		defaultRenderer->renderPassReuseVisibility(g_gbufferViewMode);
 	}
 	// ===============================
 }
@@ -539,15 +549,26 @@ inline void on_gui()
 	ImGui::Checkbox("Depth Mipmap Viz Split", &g_depthVizSplit);
 	if (!g_depthVizSplit) {
 		ImGui::Combo("Mode", &g_gbufferViewMode, gbufferLabels, IM_ARRAYSIZE(gbufferLabels));
-		}
-		if (g_depthVizSplit || g_gbufferViewMode == 6) {
-			ImGui::SliderFloat("Depth Gamma", &g_depthVisGamma, 0.2f, 3.0f);
-			int lvl = g_depthMipLevel;
-			if (ImGui::SliderInt("Mip Level", &lvl, 0, 12)) {
-				g_depthMipLevel = lvl;
+	}
+
+	if (g_depthVizSplit || g_gbufferViewMode == 6) {
+		ImGui::SliderFloat("Depth Gamma", &g_depthVisGamma, 0.2f, 3.0f);
+		int lvl = g_depthMipLevel;
+		if (ImGui::SliderInt("Mip Level", &lvl, 0, 12)) {
+			g_depthMipLevel = lvl;
 			m_imguiPanel->setDepthMipLevel(lvl);
 		}
 		defaultRenderer->setDepthDisplayLevel(g_depthMipLevel);
+	}
+
+	ImGui::Separator();
+	ImGui::Text("Occlusion Culling");
+	ImGui::Checkbox("Enable Occlusion", &g_occlusionEnabled);
+	ImGui::SliderFloat("Occlusion Bias", &g_occlusionBias, 0.0f, 0.01f, "%.6f");
+	ImGui::SliderFloat("Max View Depth", &g_maxCullDepth, 50.0f, 800.0f, "%.1f");
+	ImGui::Checkbox("Fixed Mip Override", &g_occlusionFixedMipOverride);
+	if (g_occlusionFixedMipOverride) {
+		ImGui::SliderInt("Occlusion Mip", &g_occlusionFixedMipLevel, 0, 12);
 	}
 
 	ImGui::End();

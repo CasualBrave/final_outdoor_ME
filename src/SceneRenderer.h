@@ -70,6 +70,9 @@ private:
 	GLint m_depthVizDstLevelHandle = -1;
 	GLint m_depthVizSrcLevelHandle = -1;
 	GLuint m_depthPyramidTex = 0; // R32F pyramid for occlusion
+	int m_occlusionW = 0;
+	int m_occlusionH = 0;
+	int m_occlusionLevels = 1;
 	int m_depthNumLevels = 1;
 	int m_depthFixedLevel = 0;
 	bool m_hzbBuiltThisFrame = false;
@@ -117,6 +120,11 @@ private:
 	bool m_hasCullPlanesOverride = false;
 	glm::vec3 m_cullCamPos = glm::vec3(0.0f);
 	bool m_cullDoneThisFrame = false;
+	// occlusion culling tuning
+	bool m_occlusionEnabled = true;
+	float m_occlusionBias = 0.0005f;
+	int m_occlusionFixedLevelOverride = -1; // -1 => use ceil(levels * 0.5)
+	float m_occlusionMaxViewDepth = 400.0f;
 
 public:
 	void resize(const int w, const int h);
@@ -149,9 +157,15 @@ public:
 	void renderPass(int gbufferDisplayMode);
 	void setGBufferDisplayMode(int mode) { m_gbufferDisplayMode = mode; }
 	void renderDisplayOnly(int gbufferDisplayMode);
+	// Render a pass reusing the visibility buffers (no culling dispatch / no HZB rebuild).
+	void renderPassReuseVisibility(int gbufferDisplayMode);
 	void setDepthVizEnabled(const bool enabled) { m_depthVizEnabled = enabled; }
 	void setDepthVisFar(const float farZ) { m_depthVisFar = farZ; }
 	void setDepthVisGamma(const float gamma) { m_depthVisGamma = gamma; }
+	void setOcclusionEnabled(const bool enabled) { m_occlusionEnabled = enabled; }
+	void setOcclusionBias(const float bias) { m_occlusionBias = bias; }
+	void setOcclusionFixedLevelOverride(const int level) { m_occlusionFixedLevelOverride = level; }
+	void setOcclusionMaxViewDepth(const float maxDepth) { m_occlusionMaxViewDepth = maxDepth; }
 
 private:
 	void clear(const glm::vec4 &clearColor = glm::vec4(0.0, 0.0, 0.0, 1.0), const float depth = 1.0);
@@ -160,10 +174,12 @@ private:
 	void destroyGBuffer();
 	bool setUpDisplayShader();
 	void renderGeometryPass();
+	void renderGeometryPass(const bool recomputeVisibility, const bool buildPyramids);
 	void renderDisplayPass();
 	void ensureScreenQuad();
 	void setUpInstanceBatches();
 	void renderInstanceBatches(bool foliageOnly);
+	void renderInstanceBatches(bool foliageOnly, const bool recomputeVisibility);
 	void dispatchCulling(struct InstanceBatch& batch);
 	GLuint loadTexture(const std::string& path);
 	void createDepthPyramid(const int w, const int h);
@@ -176,4 +192,5 @@ private:
 	void ensureDepthVizPyramid(const int w, const int h);
 	void destroyDepthVizPyramid();
 	void buildDepthVizPyramid();
+	void ensureOcclusionPyramid(const int w, const int h);
 };

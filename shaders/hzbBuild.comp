@@ -1,5 +1,5 @@
 #version 430 core
-// Build min-based depth pyramid (nearest depth per tile)
+// Build a depth pyramid with selectable reduction (min/max).
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(binding = 0, r32f) writeonly uniform image2D dstImage; // target level
@@ -15,22 +15,21 @@ void main() {
     ivec2 dstSize = imageSize(dstImage);
     if (dstCoord.x >= dstSize.x || dstCoord.y >= dstSize.y) return;
 
-    // map dst texel to 2x2 block in source
+    // Level-0: direct copy (no 2x2 reduction).
+    if (srcLevel < 0) {
+        float d = texelFetch(depthTex, dstCoord, 0).r;
+        imageStore(dstImage, dstCoord, vec4(d));
+        return;
+    }
+
+    // Levels 1..N: map dst texel to 2x2 block in previous level, with edge replication.
+    ivec2 srcSize = textureSize(pyramidTex, srcLevel);
     ivec2 base = dstCoord * 2;
     float m = (reduceOp == 0) ? 1.0 : 0.0; // depth in [0,1]
     for (int dy = 0; dy < 2; ++dy) {
         for (int dx = 0; dx < 2; ++dx) {
-            ivec2 srcCoord = base + ivec2(dx, dy);
-            float d;
-            if (srcLevel < 0) {
-                ivec2 srcSize0 = textureSize(depthTex, 0);
-                if (srcCoord.x >= srcSize0.x || srcCoord.y >= srcSize0.y) continue;
-                d = texelFetch(depthTex, srcCoord, 0).r;
-            } else {
-                ivec2 srcSize = textureSize(pyramidTex, srcLevel);
-                if (srcCoord.x >= srcSize.x || srcCoord.y >= srcSize.y) continue;
-                d = texelFetch(pyramidTex, srcCoord, srcLevel).r;
-            }
+            ivec2 srcCoord = clamp(base + ivec2(dx, dy), ivec2(0), srcSize - ivec2(1));
+            float d = texelFetch(pyramidTex, srcCoord, srcLevel).r;
             m = (reduceOp == 0) ? min(m, d) : max(m, d);
         }
     }
