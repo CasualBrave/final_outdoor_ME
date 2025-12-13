@@ -1,7 +1,8 @@
 #include "DynamicSceneObject.h"
 
 
-bool DynamicSceneObject::s_globalUseNormalMap = true;
+// Default off; controlled by ImGui checkbox in main.cpp (g_useNormalMap).
+bool DynamicSceneObject::s_globalUseNormalMap = false;
 
 DynamicSceneObject::DynamicSceneObject(const int maxNumVertex, const int maxNumIndex, const bool normalFlag, const bool uvFlag)
 {

@@ -29,6 +29,8 @@ layout(location = 1) uniform vec4 frustumPlanes[6];
 layout(location = 9) uniform int useOcclusion;
 layout(location = 10) uniform int fixedMipLevel;
 layout(location = 11) uniform mat4 cullVP;
+layout(location = 12) uniform mat4 cullView;
+layout(location = 13) uniform float maxViewDepth;
 layout(location = 15) uniform vec2 screenSize;
 
 layout(binding = 5) uniform sampler2D depthPyramid;
@@ -51,6 +53,10 @@ void main(){
     InstanceData inst = instances[idx];
     vec3 center = inst.sphere.xyz;
     float radius = inst.sphere.w;
+
+    // distance culling in view-space (hint: depth larger than 400)
+    vec3 viewCenter = (cullView * vec4(center, 1.0)).xyz;
+    if (-viewCenter.z > maxViewDepth) return;
 
     if(!sphereInFrustum(center, radius)) return;
 

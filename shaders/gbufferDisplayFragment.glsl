@@ -17,6 +17,8 @@ layout(location = 10) uniform mat4 viewMat;
 layout(location = 11) uniform sampler2D depthPyramid;
 layout(location = 12) uniform int depthMipLevel;
 layout(location = 13) uniform mat4 invProj;
+layout(location = 14) uniform float depthVisFar;
+layout(location = 16) uniform float depthVisGamma; // 1.0 = no curve
 
 vec3 viewVec(vec3 v){
     return normalize(v) * 0.5 + 0.5;
@@ -80,12 +82,16 @@ void main(){
         vec4 shaded = vec4(Ia * ambient + Id * diffuse * ndl + Is * specColor * spec, 1.0);
         color = applyGamma(applyFog(shaded, viewPos)).rgb;
     } else if(displayMode == 6){
-        // depth mip visualization (linearized view-space z)
+        // depth mip visualization
         float depthVal = textureLod(depthPyramid, uv, float(depthMipLevel)).r;
+        // Linearized view-space z normalized by far
         vec4 ndcV = vec4(uv * 2.0 - 1.0, depthVal * 2.0 - 1.0, 1.0);
         vec4 viewV = invProj * ndcV;
         viewV /= viewV.w;
-        float d = clamp(-viewV.z / 512.0, 0.0, 1.0);
+        float denom = max(depthVisFar, 0.001);
+        float d = clamp(-viewV.z / denom, 0.0, 1.0);
+        float g = max(depthVisGamma, 0.001);
+        d = pow(d, g);
         color = vec3(d);
     } else {
         color = texture(gDiffuseTex, uv).rgb;

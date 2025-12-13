@@ -1,0 +1,38 @@
+#version 430 core
+// Build a depth visualization mip chain using MAX reduction (to match typical Hi-Z debug screenshots).
+// Level 0 is a direct copy of the input depth. Levels 1..N are 2x2 max reductions.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, r32f) writeonly uniform image2D dstImage;
+layout(binding = 1) uniform sampler2D srcTex;
+
+// dstLevel == 0 => copy; otherwise reduce from srcLevel (usually dstLevel-1).
+layout(location = 0) uniform int dstLevel;
+layout(location = 1) uniform int srcLevel;
+
+void main() {
+    ivec2 dstCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dstSize = imageSize(dstImage);
+    if (dstCoord.x >= dstSize.x || dstCoord.y >= dstSize.y) return;
+
+    float outDepth = 1.0;
+    if (dstLevel == 0) {
+        // 1:1 copy from input depth texture.
+        outDepth = texelFetch(srcTex, dstCoord, 0).r;
+    } else {
+        // 2x2 max reduction from the previous level.
+        ivec2 base = dstCoord * 2;
+        outDepth = 0.0;
+        ivec2 srcSize = textureSize(srcTex, srcLevel);
+        for (int dy = 0; dy < 2; ++dy) {
+            for (int dx = 0; dx < 2; ++dx) {
+                ivec2 sc = base + ivec2(dx, dy);
+                if (sc.x >= srcSize.x || sc.y >= srcSize.y) continue;
+                float d = texelFetch(srcTex, sc, srcLevel).r;
+                outDepth = max(outDepth, d);
+            }
+        }
+    }
+    imageStore(dstImage, dstCoord, vec4(outDepth));
+}
+

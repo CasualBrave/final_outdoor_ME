@@ -49,6 +49,9 @@ DynamicSceneObject* m_magicStoneSO = nullptr;
 
 bool g_useNormalMap = false;
 int g_gbufferViewMode = 5; // 0:pos,1:normal,2:ambient,3:diffuse,4:specular,5:default
+bool g_depthVizSplit = false;
+int g_depthMipLevel = 0;
+float g_depthVisGamma = 1.0f;
 // ==============================================
 
 void resize_impl(int w, int h);
@@ -274,6 +277,8 @@ bool on_init(int displayWidth, int displayHeight)
 
 	resize_impl(displayWidth, displayHeight);
 	m_imguiPanel = new MyImGuiPanel();
+	// Sync default checkbox state (unchecked) with shader uniform behavior.
+	DynamicSceneObject::setGlobalNormalMapToggle(g_useNormalMap);
 
 	return true;
 }
@@ -397,6 +402,7 @@ inline void on_display()
 	const glm::mat4 playerVM = m_myCameraManager->playerViewMatrix();
 	const glm::mat4 playerProjMat = m_myCameraManager->playerProjectionMatrix();
 	const glm::vec3 playerViewOrg = m_myCameraManager->playerViewOrig();
+	const float playerFar = m_myCameraManager->playerCameraFar();
 
 	const glm::mat4 godVM = m_myCameraManager->godViewMatrix();
 	const glm::mat4 godProjMat = m_myCameraManager->godProjectionMatrix();
@@ -472,19 +478,33 @@ inline void on_display()
 	defaultRenderer->setViewport(0, 0, displayWidth, displayHeight);
 	// culling 以 player VP 為準，共用於雙 viewport
 	defaultRenderer->setCullingVP(playerProjMat * playerVM);
-	defaultRenderer->startNewFrame();
+	defaultRenderer->setCullingView(playerVM);
+	defaultRenderer->setDepthVizEnabled(g_depthVizSplit || g_gbufferViewMode == 6);
+	defaultRenderer->setDepthVisFar(playerFar);
+		defaultRenderer->setDepthVisGamma(g_depthVisGamma);
+		defaultRenderer->startNewFrame();
 
 	// rendering with player view		
 	defaultRenderer->setViewport(playerViewport[0], playerViewport[1], playerViewport[2], playerViewport[3]);
 	defaultRenderer->setView(playerVM);
 	defaultRenderer->setProjection(playerProjMat);
-	defaultRenderer->renderPass(g_gbufferViewMode);
+	const int playerMode = g_depthVizSplit ? 5 : g_gbufferViewMode;
+	defaultRenderer->renderPass(playerMode);
 
-	// rendering with god view
+	// left viewport
 	defaultRenderer->setViewport(godViewport[0], godViewport[1], godViewport[2], godViewport[3]);
-	defaultRenderer->setView(godVM);
-	defaultRenderer->setProjection(godProjMat);
-	defaultRenderer->renderPass(g_gbufferViewMode);
+	if (g_depthVizSplit) {
+		// visualize player-view depth mipmap on the left
+		defaultRenderer->setDisplaySampleViewport(playerViewport[0], playerViewport[1], playerViewport[2], playerViewport[3]);
+		defaultRenderer->setView(playerVM);
+		defaultRenderer->setProjection(playerProjMat);
+		defaultRenderer->renderDisplayOnly(6);
+	} else {
+		// rendering with god view
+		defaultRenderer->setView(godVM);
+		defaultRenderer->setProjection(godProjMat);
+		defaultRenderer->renderPass(g_gbufferViewMode);
+	}
 	// ===============================
 }
 
@@ -516,13 +536,18 @@ inline void on_gui()
 		"World Position", "World Normal", "Ambient", "Diffuse", "Specular", "Default", "Depth Mip"
 	};
 	ImGui::Text("G-Buffer View");
-	ImGui::Combo("Mode", &g_gbufferViewMode, gbufferLabels, IM_ARRAYSIZE(gbufferLabels));
-	if (g_gbufferViewMode == 6) {
-		int lvl = m_imguiPanel->depthMipLevel();
-		if (ImGui::SliderInt("Mip Level", &lvl, 0, 12)) {
+	ImGui::Checkbox("Depth Mipmap Viz Split", &g_depthVizSplit);
+	if (!g_depthVizSplit) {
+		ImGui::Combo("Mode", &g_gbufferViewMode, gbufferLabels, IM_ARRAYSIZE(gbufferLabels));
+		}
+		if (g_depthVizSplit || g_gbufferViewMode == 6) {
+			ImGui::SliderFloat("Depth Gamma", &g_depthVisGamma, 0.2f, 3.0f);
+			int lvl = g_depthMipLevel;
+			if (ImGui::SliderInt("Mip Level", &lvl, 0, 12)) {
+				g_depthMipLevel = lvl;
 			m_imguiPanel->setDepthMipLevel(lvl);
 		}
-		defaultRenderer->setDepthDisplayLevel(lvl);
+		defaultRenderer->setDepthDisplayLevel(g_depthMipLevel);
 	}
 
 	ImGui::End();

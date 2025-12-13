@@ -1,5 +1,6 @@
 #include "SceneRenderer.h"
 #include "FrustumUtils.h"
+#include <algorithm>
 #include <cmath>
 #include <stb_image.h>
 #include <assimp/Importer.hpp>
@@ -23,6 +24,14 @@ SceneRenderer::~SceneRenderer()
 	if (this->m_displayProgram != nullptr) {
 		delete this->m_displayProgram;
 		this->m_displayProgram = nullptr;
+	}
+	if (this->m_depthVizProgram != nullptr) {
+		delete this->m_depthVizProgram;
+		this->m_depthVizProgram = nullptr;
+	}
+	if (this->m_hzbProgram != nullptr) {
+		delete this->m_hzbProgram;
+		this->m_hzbProgram = nullptr;
 	}
 	if (this->m_cullProgram != nullptr) {
 		delete this->m_cullProgram;
@@ -51,12 +60,19 @@ void SceneRenderer::renderPass(int gbufferDisplayMode){
 	this->renderDisplayPass();
 }
 
+void SceneRenderer::renderDisplayOnly(int gbufferDisplayMode) {
+	this->m_gbufferDisplayMode = gbufferDisplayMode;
+	this->renderDisplayPass();
+}
+
 // =======================================
 void SceneRenderer::resize(const int w, const int h){
 	this->m_frameWidth = w;
 	this->m_frameHeight = h;
 	this->destroyGBuffer();
+	this->destroyDepthPyramid();
 	this->createGBuffer(w, h);
+	this->createDepthPyramid(w, h);
 }
 bool SceneRenderer::initialize(const int w, const int h, ShaderProgram* shaderProgram){
 	this->m_shaderProgram = shaderProgram;
@@ -68,6 +84,12 @@ bool SceneRenderer::initialize(const int w, const int h, ShaderProgram* shaderPr
 		return false;
 	}	
 	if (!this->setUpDisplayShader()) {
+		return false;
+	}
+	if (!this->setUpHZBShader()) {
+		return false;
+	}
+	if (!this->setUpDepthVizShader()) {
 		return false;
 	}
 	this->ensureScreenQuad();
@@ -89,6 +111,11 @@ void SceneRenderer::setViewport(const int x, const int y, const int w, const int
 	this->m_curViewportY = y;
 	this->m_curViewportW = w;
 	this->m_curViewportH = h;
+	// default: sample the same region we render into
+	this->m_displaySampleViewportX = x;
+	this->m_displaySampleViewportY = y;
+	this->m_displaySampleViewportW = w;
+	this->m_displaySampleViewportH = h;
 }
 void SceneRenderer::appendDynamicSceneObject(DynamicSceneObject *obj){
 	this->m_dynamicSOs.push_back(obj);
@@ -199,6 +226,23 @@ bool SceneRenderer::setUpDisplayShader() {
 	this->m_displayDepthMipLevelHandle = 12;
 	this->m_displayInvProjHandle = 13;
 
+	return true;
+}
+
+bool SceneRenderer::setUpHZBShader() {
+	Shader* cs = new Shader(GL_COMPUTE_SHADER);
+	cs->createShaderFromFile("shaders\\hzbBuild.comp");
+	this->m_hzbProgram = new ShaderProgram();
+	this->m_hzbProgram->init();
+	this->m_hzbProgram->attachShader(cs);
+	this->m_hzbProgram->checkStatus();
+	this->m_hzbProgram->linkProgram();
+	cs->releaseShader();
+	delete cs;
+
+	this->m_hzbProgram->useProgram();
+	this->m_hzbSrcLevelHandle = 0;
+	this->m_hzbDstLevelHandle = 1;
 	return true;
 }
 
@@ -350,7 +394,7 @@ void SceneRenderer::setUpInstanceBatches() {
 		"assets\\outdoor\\poissonPoints_621043_after.ppd2",
 		glm::vec3(0.0f,0.66f,0.0f), 1.4f,
 		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f,
-		false, false);
+		true, false);
 
 	createBatch("bush01",
 		"assets\\outdoor\\bush01_lod2.obj",
@@ -358,7 +402,7 @@ void SceneRenderer::setUpInstanceBatches() {
 		"assets\\outdoor\\poissonPoints_1010.ppd2",
 		glm::vec3(0.0f,2.55f,0.0f), 3.4f,
 		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f,
-		false, false);
+		true, false);
 
 	createBatch("bush05",
 		"assets\\outdoor\\bush05_lod2.obj",
@@ -366,7 +410,7 @@ void SceneRenderer::setUpInstanceBatches() {
 		"assets\\outdoor\\poissonPoints_2797.ppd2",
 		glm::vec3(0.0f,1.76f,0.0f), 2.6f,
 		glm::vec3(1.0f), glm::vec3(0.0f), 1.0f,
-		false, false);
+		true, false);
 
 	createBatch("buildingV2",
 		"assets\\outdoor\\Medieval_Building_LowPoly\\medieval_building_lowpoly_2.obj",
@@ -407,11 +451,13 @@ void SceneRenderer::dispatchCulling(InstanceBatch& batch){
 	glUniform1i(9, batch.useOcclusion ? 1 : 0);
 	glUniform1i(10, this->m_depthFixedLevel);
 	glUniformMatrix4fv(11, 1, GL_FALSE, glm::value_ptr(this->m_cullVP));
+	glUniformMatrix4fv(12, 1, GL_FALSE, glm::value_ptr(this->m_cullView));
+	glUniform1f(13, 400.0f);
 	glUniform2f(15, (float)this->m_frameWidth, (float)this->m_frameHeight);
 	// bind depth pyramid on unit 5
-	if (this->m_gbufferDepthTex != 0) {
+	if (this->m_depthPyramidTex != 0) {
 		glActiveTexture(GL_TEXTURE5);
-		glBindTexture(GL_TEXTURE_2D, this->m_gbufferDepthTex);
+		glBindTexture(GL_TEXTURE_2D, this->m_depthPyramidTex);
 	}
 
 	uint32_t groupSize = 256;
@@ -423,15 +469,17 @@ void SceneRenderer::dispatchCulling(InstanceBatch& batch){
 void SceneRenderer::renderInstanceBatches(bool foliageOnly){
 	if(this->m_instanceBatches.empty()) return;
 	SceneManager* manager = SceneManager::Instance();
-	for(auto& batch : this->m_instanceBatches){
-		// pass split: occluder pass renders occluders; foliage pass renders non-occluders
-		if (foliageOnly && batch.isOccluder) continue;
-		if (!foliageOnly && !batch.isOccluder) continue;
-		this->dispatchCulling(batch);
-		this->m_shaderProgram->useProgram();
-		glBindVertexArray(batch.vao);
-		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, batch.instanceBuffer);
-		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, batch.visibleIndexBuffer);
+		for(auto& batch : this->m_instanceBatches){
+			// pass split: occluder pass renders occluders; foliage pass renders non-occluders
+			if (foliageOnly && batch.isOccluder) continue;
+			if (!foliageOnly && !batch.isOccluder) continue;
+			this->dispatchCulling(batch);
+			this->m_shaderProgram->useProgram();
+			// Instances never use fragment normal mapping in this project.
+			glUniform1i(manager->m_useNormalMapHandle, 0);
+			glBindVertexArray(batch.vao);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, batch.instanceBuffer);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, batch.visibleIndexBuffer);
 		if(batch.texture){
 			glActiveTexture(manager->m_albedoTexUnit);
 			glBindTexture(GL_TEXTURE_2D, batch.texture);
@@ -493,7 +541,7 @@ bool SceneRenderer::createGBuffer(const int w, const int h) {
 
 	int maxDim = (w > h) ? w : h;
 	this->m_depthNumLevels = (int)std::floor(std::log2((float)maxDim)) + 1;
-	this->m_depthFixedLevel = (int)std::ceil(this->m_depthNumLevels * 0.5f);
+	this->m_depthFixedLevel = (int)std::ceil(this->m_depthNumLevels * 100000.0f);
 
 	glDrawBuffers(5, attachments);
 	const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
@@ -507,6 +555,12 @@ void SceneRenderer::destroyGBuffer() {
 		glDeleteTextures(1, &this->m_gbufferDepthTex);
 		this->m_gbufferDepthTex = 0;
 	}
+	this->destroyDepthVizTex();
+	this->destroyDepthVizPyramid();
+	if (this->m_depthPyramidTex != 0) {
+		glDeleteTextures(1, &this->m_depthPyramidTex);
+		this->m_depthPyramidTex = 0;
+	}
 	for (int i = 0; i < 5; ++i) {
 		if (this->m_gbufferTextures[i] != 0) {
 			glDeleteTextures(1, &this->m_gbufferTextures[i]);
@@ -516,6 +570,174 @@ void SceneRenderer::destroyGBuffer() {
 	if (this->m_gbufferFBO != 0) {
 		glDeleteFramebuffers(1, &this->m_gbufferFBO);
 		this->m_gbufferFBO = 0;
+	}
+}
+
+void SceneRenderer::ensureDepthVizTex(const int w, const int h) {
+	if (w <= 0 || h <= 0) return;
+	const int maxDim = (w > h) ? w : h;
+	const int levels = (int)std::floor(std::log2((float)maxDim)) + 1;
+	if (this->m_depthVizTex != 0 && this->m_depthVizW == w && this->m_depthVizH == h && this->m_depthVizLevels == levels) {
+		return;
+	}
+	this->destroyDepthVizTex();
+	this->m_depthVizW = w;
+	this->m_depthVizH = h;
+	this->m_depthVizLevels = std::max(1, levels);
+	glCreateTextures(GL_TEXTURE_2D, 1, &this->m_depthVizTex);
+	glTextureStorage2D(this->m_depthVizTex, this->m_depthVizLevels, GL_DEPTH_COMPONENT32F, w, h);
+	glTextureParameteri(this->m_depthVizTex, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+	glTextureParameteri(this->m_depthVizTex, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTextureParameteri(this->m_depthVizTex, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(this->m_depthVizTex, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glCreateFramebuffers(1, &this->m_depthVizFBO);
+	glNamedFramebufferTexture(this->m_depthVizFBO, GL_DEPTH_ATTACHMENT, this->m_depthVizTex, 0);
+	glNamedFramebufferDrawBuffer(this->m_depthVizFBO, GL_NONE);
+	glNamedFramebufferReadBuffer(this->m_depthVizFBO, GL_NONE);
+}
+
+void SceneRenderer::destroyDepthVizTex() {
+	if (this->m_depthVizTex != 0) {
+		glDeleteTextures(1, &this->m_depthVizTex);
+		this->m_depthVizTex = 0;
+	}
+	if (this->m_depthVizFBO != 0) {
+		glDeleteFramebuffers(1, &this->m_depthVizFBO);
+		this->m_depthVizFBO = 0;
+	}
+	this->m_depthVizW = 0;
+	this->m_depthVizH = 0;
+	this->m_depthVizLevels = 1;
+}
+
+void SceneRenderer::ensureDepthVizPyramid(const int w, const int h) {
+	if (w <= 0 || h <= 0) return;
+	const int maxDim = (w > h) ? w : h;
+	const int levels = (int)std::floor(std::log2((float)maxDim)) + 1;
+	if (this->m_depthVizPyramidTex != 0 && this->m_depthVizW == w && this->m_depthVizH == h && this->m_depthVizLevels == levels) {
+		return;
+	}
+	this->destroyDepthVizPyramid();
+	this->m_depthVizW = w;
+	this->m_depthVizH = h;
+	this->m_depthVizLevels = std::max(1, levels);
+	glCreateTextures(GL_TEXTURE_2D, 1, &this->m_depthVizPyramidTex);
+	glTextureStorage2D(this->m_depthVizPyramidTex, this->m_depthVizLevels, GL_R32F, w, h);
+	glTextureParameteri(this->m_depthVizPyramidTex, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+	glTextureParameteri(this->m_depthVizPyramidTex, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTextureParameteri(this->m_depthVizPyramidTex, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(this->m_depthVizPyramidTex, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+void SceneRenderer::destroyDepthVizPyramid() {
+	if (this->m_depthVizPyramidTex != 0) {
+		glDeleteTextures(1, &this->m_depthVizPyramidTex);
+		this->m_depthVizPyramidTex = 0;
+	}
+}
+
+bool SceneRenderer::setUpDepthVizShader() {
+	Shader* cs = new Shader(GL_COMPUTE_SHADER);
+	cs->createShaderFromFile("shaders\\depthVizBuild.comp");
+	this->m_depthVizProgram = new ShaderProgram();
+	this->m_depthVizProgram->init();
+	this->m_depthVizProgram->attachShader(cs);
+	this->m_depthVizProgram->checkStatus();
+	this->m_depthVizProgram->linkProgram();
+	cs->releaseShader();
+	delete cs;
+
+	this->m_depthVizProgram->useProgram();
+	this->m_depthVizDstLevelHandle = 0;
+	this->m_depthVizSrcLevelHandle = 1;
+	return true;
+}
+
+void SceneRenderer::buildDepthVizPyramid() {
+	if (!this->m_depthVizEnabled || this->m_depthVizTex == 0 || this->m_depthVizPyramidTex == 0 || this->m_depthVizProgram == nullptr) return;
+	this->m_depthVizProgram->useProgram();
+
+	// Level 0: copy input depth -> R32F pyramid level 0.
+	glBindImageTexture(0, this->m_depthVizPyramidTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+	glBindTextureUnit(1, this->m_depthVizTex);
+	glUniform1i(this->m_depthVizDstLevelHandle, 0);
+	glUniform1i(this->m_depthVizSrcLevelHandle, 0);
+	int gx0 = (int)std::ceil((float)this->m_depthVizW / 8.0f);
+	int gy0 = (int)std::ceil((float)this->m_depthVizH / 8.0f);
+	glDispatchCompute(gx0, gy0, 1);
+	glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+
+	// Levels 1..N: max reduction from previous level (stored in the same R32F texture).
+	glBindTextureUnit(1, this->m_depthVizPyramidTex);
+	int srcW = this->m_depthVizW;
+	int srcH = this->m_depthVizH;
+	for (int level = 1; level < this->m_depthVizLevels; ++level) {
+		int dstW = std::max(1, srcW >> 1);
+		int dstH = std::max(1, srcH >> 1);
+		glBindImageTexture(0, this->m_depthVizPyramidTex, level, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+		glUniform1i(this->m_depthVizDstLevelHandle, level);
+		glUniform1i(this->m_depthVizSrcLevelHandle, level - 1);
+		int gx = (int)std::ceil((float)dstW / 8.0f);
+		int gy = (int)std::ceil((float)dstH / 8.0f);
+		glDispatchCompute(gx, gy, 1);
+		glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+		srcW = dstW;
+		srcH = dstH;
+	}
+}
+
+void SceneRenderer::createDepthPyramid(const int w, const int h) {
+	if (this->m_depthPyramidTex != 0) {
+		glDeleteTextures(1, &this->m_depthPyramidTex);
+		this->m_depthPyramidTex = 0;
+	}
+	if (w <= 0 || h <= 0) return;
+	glCreateTextures(GL_TEXTURE_2D, 1, &this->m_depthPyramidTex);
+	glTextureStorage2D(this->m_depthPyramidTex, this->m_depthNumLevels, GL_R32F, w, h);
+	glTextureParameteri(this->m_depthPyramidTex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTextureParameteri(this->m_depthPyramidTex, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTextureParameteri(this->m_depthPyramidTex, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTextureParameteri(this->m_depthPyramidTex, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+void SceneRenderer::destroyDepthPyramid() {
+	if (this->m_depthPyramidTex != 0) {
+		glDeleteTextures(1, &this->m_depthPyramidTex);
+		this->m_depthPyramidTex = 0;
+	}
+}
+
+void SceneRenderer::buildDepthPyramid() {
+	if (this->m_hzbProgram == nullptr || this->m_depthPyramidTex == 0 || this->m_gbufferDepthTex == 0) return;
+	this->m_hzbProgram->useProgram();
+	// level 0: copy max from depth texture
+	glBindImageTexture(0, this->m_depthPyramidTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+	glBindTextureUnit(1, this->m_gbufferDepthTex);
+	glBindTextureUnit(2, this->m_depthPyramidTex);
+	glUniform1i(this->m_hzbSrcLevelHandle, -1);
+	glUniform1i(this->m_hzbDstLevelHandle, 0);
+	int w = (int)std::ceil((float)this->m_frameWidth / 8.0f);
+	int h = (int)std::ceil((float)this->m_frameHeight / 8.0f);
+	glDispatchCompute(w, h, 1);
+	glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+	// build remaining levels from pyramid itself
+	int srcW = this->m_frameWidth;
+	int srcH = this->m_frameHeight;
+	for (int level = 1; level < this->m_depthNumLevels; ++level) {
+		srcW = std::max(1, srcW >> 1);
+		srcH = std::max(1, srcH >> 1);
+		int dstW = std::max(1, srcW >> 1);
+		int dstH = std::max(1, srcH >> 1);
+		glBindImageTexture(0, this->m_depthPyramidTex, level, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+		glUniform1i(this->m_hzbSrcLevelHandle, level - 1);
+		glUniform1i(this->m_hzbDstLevelHandle, level);
+		int gx = (int)std::ceil((float)dstW / 8.0f);
+		int gy = (int)std::ceil((float)dstH / 8.0f);
+		glDispatchCompute(gx, gy, 1);
+		glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+		srcW = dstW;
+		srcH = dstH;
 	}
 }
 
@@ -541,6 +763,8 @@ void SceneRenderer::renderGeometryPass() {
 	this->m_shaderProgram->useProgram();
 	glUniformMatrix4fv(manager->m_projMatHandle, 1, false, glm::value_ptr(this->m_projMat));
 	glUniformMatrix4fv(manager->m_viewMatHandle, 1, false, glm::value_ptr(this->m_viewMat));
+	// Only magic stone uses fragment normal mapping; default other draws to off.
+	glUniform1i(manager->m_useNormalMapHandle, 0);
 	// culling VP is provided externally via setCullingVP (player frustum)
 	glm::mat4 invView = glm::inverse(this->m_viewMat);
 	this->m_cullCamPos = glm::vec3(invView[3]);
@@ -564,11 +788,31 @@ void SceneRenderer::renderGeometryPass() {
 	// pass 1: occluder instances only (buildings)
 	this->renderInstanceBatches(false);
 
-	// build HZB once per frame from player pass depth
-	if (!this->m_hzbBuiltThisFrame && this->m_gbufferDepthTex != 0) {
-		glBindTexture(GL_TEXTURE_2D, this->m_gbufferDepthTex);
-		glGenerateMipmap(GL_TEXTURE_2D);
-		glBindTexture(GL_TEXTURE_2D, 0);
+	// build depth mipmap for visualization (viewport-sized texture to avoid edge contamination)
+	if (this->m_depthVizEnabled && this->m_gbufferDepthTex != 0) {
+		this->ensureDepthVizTex(this->m_curViewportW, this->m_curViewportH);
+		this->ensureDepthVizPyramid(this->m_curViewportW, this->m_curViewportH);
+		if (this->m_depthVizTex != 0 && this->m_depthVizFBO != 0) {
+			// Blit only the player viewport region to a viewport-sized depth texture, then mipmap that.
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, this->m_gbufferFBO);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, this->m_depthVizFBO);
+			glBlitFramebuffer(
+				this->m_curViewportX, this->m_curViewportY,
+				this->m_curViewportX + this->m_curViewportW, this->m_curViewportY + this->m_curViewportH,
+				0, 0, this->m_curViewportW, this->m_curViewportH,
+				GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+			glBindFramebuffer(GL_FRAMEBUFFER, this->m_gbufferFBO);
+			this->buildDepthVizPyramid();
+		}
+	}
+
+	// build HZB once per frame from player pass depth, only if any batch uses occlusion
+	bool anyOcclusion = false;
+	for (const auto& b : this->m_instanceBatches) {
+		if (b.useOcclusion) { anyOcclusion = true; break; }
+	}
+	if (anyOcclusion && !this->m_hzbBuiltThisFrame && this->m_gbufferDepthTex != 0 && this->m_depthPyramidTex != 0) {
+		this->buildDepthPyramid();
 		this->m_hzbBuiltThisFrame = true;
 	}
 
@@ -621,16 +865,40 @@ void SceneRenderer::renderDisplayPass() {
 	glActiveTexture(GL_TEXTURE4);
 	glBindTexture(GL_TEXTURE_2D, this->m_gbufferTextures[4]);
 	glActiveTexture(GL_TEXTURE5);
-	glBindTexture(GL_TEXTURE_2D, this->m_gbufferDepthTex);
+	if (this->m_gbufferDisplayMode == 6 && this->m_depthVizTex != 0) {
+		glBindTexture(GL_TEXTURE_2D, (this->m_depthVizPyramidTex != 0) ? this->m_depthVizPyramidTex : this->m_depthVizTex);
+	} else {
+		glBindTexture(GL_TEXTURE_2D, this->m_gbufferDepthTex);
+	}
 
 	glUniform1i(this->m_displayModeHandle, this->m_gbufferDisplayMode);
 	glUniform1i(this->m_displayDepthMipLevelHandle, this->m_depthDisplayLevel);
 	glm::mat4 invProj = glm::inverse(this->m_projMat);
 	glUniformMatrix4fv(this->m_displayInvProjHandle, 1, GL_FALSE, glm::value_ptr(invProj));
-	const float uvScaleX = (this->m_frameWidth  > 0) ? (float)this->m_curViewportW / (float)this->m_frameWidth  : 1.0f;
-	const float uvScaleY = (this->m_frameHeight > 0) ? (float)this->m_curViewportH / (float)this->m_frameHeight : 1.0f;
-	const float uvBiasX  = (this->m_frameWidth  > 0) ? (float)this->m_curViewportX / (float)this->m_frameWidth  : 0.0f;
-	const float uvBiasY  = (this->m_frameHeight > 0) ? (float)this->m_curViewportY / (float)this->m_frameHeight : 0.0f;
+	glUniform1f(14, this->m_depthVisFar);
+	glUniform1f(16, this->m_depthVisGamma);
+	float uvScaleX = 1.0f, uvScaleY = 1.0f, uvBiasX = 0.0f, uvBiasY = 0.0f;
+	if (this->m_gbufferDisplayMode == 6 && this->m_depthVizTex != 0) {
+		// depth viz texture is already viewport-sized: map to texel centers in [0,1]
+		uvScaleX = (this->m_depthVizW > 1) ? ((float)(this->m_depthVizW - 1) / (float)this->m_depthVizW) : 0.0f;
+		uvScaleY = (this->m_depthVizH > 1) ? ((float)(this->m_depthVizH - 1) / (float)this->m_depthVizH) : 0.0f;
+		uvBiasX = (this->m_depthVizW > 0) ? (0.5f / (float)this->m_depthVizW) : 0.0f;
+		uvBiasY = (this->m_depthVizH > 0) ? (0.5f / (float)this->m_depthVizH) : 0.0f;
+	} else {
+		// Map the quad UV [0,1] onto texel centers of the sampled viewport region (within full-resolution G-buffer).
+		uvScaleX = (this->m_frameWidth > 0)
+			? ((this->m_displaySampleViewportW > 1) ? ((float)(this->m_displaySampleViewportW - 1) / (float)this->m_frameWidth) : 0.0f)
+			: 1.0f;
+		uvScaleY = (this->m_frameHeight > 0)
+			? ((this->m_displaySampleViewportH > 1) ? ((float)(this->m_displaySampleViewportH - 1) / (float)this->m_frameHeight) : 0.0f)
+			: 1.0f;
+		uvBiasX = (this->m_frameWidth > 0)
+			? ((float)this->m_displaySampleViewportX + 0.5f) / (float)this->m_frameWidth
+			: 0.0f;
+		uvBiasY = (this->m_frameHeight > 0)
+			? ((float)this->m_displaySampleViewportY + 0.5f) / (float)this->m_frameHeight
+			: 0.0f;
+	}
 	glUniform2f(this->m_displayUVScaleHandle, uvScaleX, uvScaleY);
 	glUniform2f(this->m_displayUVBiasHandle, uvBiasX, uvBiasY);
 
