@@ -26,8 +26,8 @@
 #include "terrain\MyTerrain.h"
 #include "MyCameraManager.h"
 
-const int INIT_WIDTH = 1024;
-const int INIT_HEIGHT = 512;
+const int INIT_WIDTH = 1920;
+const int INIT_HEIGHT = 960;
 
 // ==============================================
 // You can probably tell these come from class members,
@@ -57,6 +57,8 @@ float g_occlusionBias = 0.0005f;
 bool g_occlusionFixedMipOverride = false;
 int g_occlusionFixedMipLevel = 0;
 float g_maxCullDepth = 400.0f;
+bool g_shadowEnabled = false;
+bool g_shadowCascadeViz = false;
 // ==============================================
 
 void resize_impl(int w, int h);
@@ -491,6 +493,8 @@ inline void on_display()
 	defaultRenderer->setOcclusionBias(g_occlusionBias);
 	defaultRenderer->setOcclusionFixedLevelOverride(g_occlusionFixedMipOverride ? g_occlusionFixedMipLevel : -1);
 	defaultRenderer->setOcclusionMaxViewDepth(g_maxCullDepth);
+	defaultRenderer->setShadowEnabled(g_shadowEnabled);
+	defaultRenderer->setShadowCascadeVizEnabled(g_shadowCascadeViz);
 	defaultRenderer->startNewFrame();
 
 	// rendering with player view		
@@ -543,7 +547,7 @@ inline void on_gui()
 	}
 
 	static const char* gbufferLabels[] = {
-		"World Position", "World Normal", "Ambient", "Diffuse", "Specular", "Default", "Depth Mip"
+		"World space vertex", "World space normal", "Ambient", "Diffuse", "Specular", "Default", "Depth Mip"
 	};
 	ImGui::Text("G-Buffer View");
 	ImGui::Checkbox("Depth Mipmap Viz Split", &g_depthVizSplit);
@@ -570,6 +574,11 @@ inline void on_gui()
 	if (g_occlusionFixedMipOverride) {
 		ImGui::SliderInt("Occlusion Mip", &g_occlusionFixedMipLevel, 0, 12);
 	}
+
+	ImGui::Separator();
+	ImGui::Text("Cascaded Shadow Mapping");
+	ImGui::Checkbox("Enable Shadows", &g_shadowEnabled);
+	ImGui::Checkbox("Visualize Cascades (RGB)", &g_shadowCascadeViz);
 
 	ImGui::End();
 }

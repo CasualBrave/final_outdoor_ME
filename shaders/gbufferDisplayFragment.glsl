@@ -19,6 +19,13 @@ layout(location = 12) uniform int depthMipLevel;
 layout(location = 13) uniform mat4 invProj;
 layout(location = 14) uniform float depthVisFar;
 layout(location = 16) uniform float depthVisGamma; // 1.0 = no curve
+// Cascaded shadow mapping
+layout(location = 17) uniform int shadowEnabled;
+layout(location = 18) uniform int cascadeVizEnabled;
+layout(location = 19) uniform vec3 cascadeFar; // (50, 200, 500)
+layout(location = 20) uniform mat4 lightVP[3];
+layout(location = 32) uniform sampler2DArrayShadow shadowMap;
+layout(location = 34) uniform mat4 cullViewMat;
 
 vec3 viewVec(vec3 v){
     return normalize(v) * 0.5 + 0.5;
@@ -42,6 +49,49 @@ vec4 applyGamma(vec4 color){
     return color;
 }
 
+bool chooseCascadeMapBased(vec3 worldPos, out int chosen, out vec3 uvz);
+
+float sampleShadow(vec3 worldPos, vec3 normalWS) {
+    if (shadowEnabled == 0) return 1.0;
+	int chosen = -1;
+	vec3 uvz = vec3(0.0);
+	if (!chooseCascadeMapBased(worldPos, chosen, uvz)) return 1.0;
+
+	// Bias: reduce acne (world-space normal vs world-space light direction).
+	vec3 Lw = normalize(lightDirWorld);
+	float ndl = max(dot(normalize(normalWS), Lw), 0.0);
+	float bias = max(0.0008 * (1.0 - ndl), 0.0003);
+
+	ivec3 ts = textureSize(shadowMap, 0);
+	vec2 texel = 1.0 / vec2(max(ts.x, 1), max(ts.y, 1));
+
+	float sum = 0.0;
+	for (int y = -1; y <= 1; ++y) {
+		for (int x = -1; x <= 1; ++x) {
+			vec2 o = vec2(x, y) * texel;
+			sum += texture(shadowMap, vec4(uvz.xy + o, float(chosen), uvz.z - bias));
+		}
+	}
+	return sum / 9.0;
+}
+
+bool chooseCascadeMapBased(vec3 worldPos, out int chosen, out vec3 uvz) {
+	chosen = -1;
+	uvz = vec3(0.0);
+	for (int c = 0; c < 3; ++c) {
+		vec4 clip = lightVP[c] * vec4(worldPos, 1.0);
+		if (abs(clip.w) < 1e-6) continue;
+		vec3 ndc = clip.xyz / clip.w;
+		vec3 t = ndc * 0.5 + 0.5;
+		if (t.x >= 0.0 && t.x <= 1.0 && t.y >= 0.0 && t.y <= 1.0 && t.z >= 0.0 && t.z <= 1.0) {
+			chosen = c;
+			uvz = t;
+			return true;
+		}
+	}
+	return false;
+}
+
 void main(){
     vec2 uv = v_uv * uvScale + uvBias;
     vec3 color = vec3(0.0);
@@ -57,6 +107,7 @@ void main(){
         color = texture(gSpecularTex, uv).rgb;
     } else if(displayMode == 5){
         // default: Blinn-Phong 與原 forward 版本一致（含 fog + gamma）
+        float rawDepth = texture(depthPyramid, uv).r;
         vec3 P = texture(gPositionTex, uv).xyz;
         vec3 Nworld = normalize(texture(gNormalTex, uv).xyz);
         vec3 ambient = texture(gAmbientTex, uv).rgb;
@@ -79,8 +130,26 @@ void main(){
         float ndh = max(dot(N, H), 0.0);
         float spec = (ndl > 0.0) ? pow(ndh, shininess) : 0.0;
 
-        vec4 shaded = vec4(Ia * ambient + Id * diffuse * ndl + Is * specColor * spec, 1.0);
-        color = applyGamma(applyFog(shaded, viewPos)).rgb;
+        // Background pixels have depth==1 and cleared G-buffer; keep them untouched (sky stays black).
+        float shadow = (rawDepth >= 0.999999) ? 1.0 : sampleShadow(P, Nworld);
+        vec3 direct = Id * diffuse * ndl + Is * specColor * spec;
+        vec4 shaded = vec4(Ia * ambient + shadow * direct, 1.0);
+        vec3 outColor = applyGamma(applyFog(shaded, viewPos)).rgb;
+
+        // Visualize cascades (RGB mixing) using map-based cascade selection:
+        // pick the tightest cascade that covers this pixel in shadow texture space.
+        if (cascadeVizEnabled != 0 && rawDepth < 0.999999) {
+			int cas = -1;
+			vec3 uvz = vec3(0.0);
+			if (chooseCascadeMapBased(P, cas, uvz)) {
+				vec3 tint = (cas == 0) ? vec3(1.0, 0.0, 0.0)
+					: (cas == 1) ? vec3(0.0, 1.0, 0.0)
+					: vec3(0.0, 0.0, 1.0);
+				outColor = clamp(outColor * 0.6 + tint * 0.4, 0.0, 1.0);
+			}
+        }
+
+        color = outColor;
     } else if(displayMode == 6){
         // depth mip visualization
         float depthVal = textureLod(depthPyramid, uv, float(depthMipLevel)).r;

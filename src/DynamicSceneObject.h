@@ -27,6 +27,13 @@ public:
 	void setNormalTexture(const GLuint texHandle);
 	static void setGlobalNormalMapToggle(const bool flag);
 
+	// Minimal accessors for special rendering passes (e.g., shadow map).
+	GLuint vao() const { return m_vao; }
+	GLenum primitive() const { return m_primitive; }
+	int indexCount() const { return m_indexCount; }
+	int pixelFunctionId() const { return m_pixelFunctionId; }
+	const glm::mat4& modelMat() const { return m_modelMat; }
+
 private:
 	GLuint m_indexBufferHandle;
 	float* m_dataBuffer = nullptr;

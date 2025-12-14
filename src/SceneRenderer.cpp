@@ -1,11 +1,14 @@
 #include "SceneRenderer.h"
 #include "FrustumUtils.h"
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <stb_image.h>
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
+
+static void computeFrustumCornersWS(const glm::mat4& viewMat, const glm::mat4& projMat, float nearD, float farD, glm::vec3 outCorners[8]);
 
 
 SceneRenderer::SceneRenderer()
@@ -24,6 +27,11 @@ SceneRenderer::~SceneRenderer()
 	if (this->m_displayProgram != nullptr) {
 		delete this->m_displayProgram;
 		this->m_displayProgram = nullptr;
+	}
+	this->destroyShadowResources();
+	if (this->m_shadowProgram != nullptr) {
+		delete this->m_shadowProgram;
+		this->m_shadowProgram = nullptr;
 	}
 	if (this->m_depthVizProgram != nullptr) {
 		delete this->m_depthVizProgram;
@@ -53,6 +61,7 @@ void SceneRenderer::startNewFrame() {
 	// allow culling dispatch once per frame
 	this->m_cullDoneThisFrame = false;
 	this->m_hzbBuiltThisFrame = false;
+	this->m_shadowBuiltThisFrame = false;
 }
 void SceneRenderer::renderPass(int gbufferDisplayMode){
 	this->m_gbufferDisplayMode = gbufferDisplayMode;
@@ -94,6 +103,9 @@ bool SceneRenderer::initialize(const int w, const int h, ShaderProgram* shaderPr
 		return false;
 	}
 	if (!this->setUpDepthVizShader()) {
+		return false;
+	}
+	if (!this->setUpShadowShader()) {
 		return false;
 	}
 	this->ensureScreenQuad();
@@ -221,6 +233,7 @@ bool SceneRenderer::setUpDisplayShader() {
 	glUniform1i(3, 3); // gDiffuseTex  -> unit3
 	glUniform1i(4, 4); // gSpecularTex -> unit4
 	glUniform1i(11, 5); // depthPyramid -> unit5
+	glUniform1i(this->m_shadowMapHandle, 6); // shadowMap -> unit6
 	this->m_displayModeHandle = 5;
 	this->m_displayUVScaleHandle = 6;
 	this->m_displayUVBiasHandle = 7;
@@ -248,6 +261,189 @@ bool SceneRenderer::setUpHZBShader() {
 	this->m_hzbSrcLevelHandle = 0;
 	this->m_hzbDstLevelHandle = 1;
 	return true;
+}
+
+bool SceneRenderer::setUpShadowShader() {
+	Shader* vs = new Shader(GL_VERTEX_SHADER);
+	vs->createShaderFromFile("shaders\\shadowDepthVertex.glsl");
+	Shader* fs = new Shader(GL_FRAGMENT_SHADER);
+	fs->createShaderFromFile("shaders\\shadowDepthFragment.glsl");
+
+	this->m_shadowProgram = new ShaderProgram();
+	this->m_shadowProgram->init();
+	this->m_shadowProgram->attachShader(vs);
+	this->m_shadowProgram->attachShader(fs);
+	this->m_shadowProgram->checkStatus();
+	this->m_shadowProgram->linkProgram();
+
+	vs->releaseShader();
+	fs->releaseShader();
+	delete vs;
+	delete fs;
+	return true;
+}
+
+void SceneRenderer::destroyShadowResources() {
+	if (this->m_shadowTexArray != 0) {
+		glDeleteTextures(1, &this->m_shadowTexArray);
+		this->m_shadowTexArray = 0;
+	}
+	if (this->m_shadowFBO != 0) {
+		glDeleteFramebuffers(1, &this->m_shadowFBO);
+		this->m_shadowFBO = 0;
+	}
+}
+
+void SceneRenderer::ensureShadowResources() {
+	if (this->m_shadowFBO != 0 && this->m_shadowTexArray != 0) return;
+
+	glGenFramebuffers(1, &this->m_shadowFBO);
+
+	glCreateTextures(GL_TEXTURE_2D_ARRAY, 1, &this->m_shadowTexArray);
+	glTextureStorage3D(this->m_shadowTexArray, 1, GL_DEPTH_COMPONENT32F, this->m_shadowMapSize, this->m_shadowMapSize, 3);
+	glTextureParameteri(this->m_shadowTexArray, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTextureParameteri(this->m_shadowTexArray, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTextureParameteri(this->m_shadowTexArray, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTextureParameteri(this->m_shadowTexArray, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+	const float border[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	glTextureParameterfv(this->m_shadowTexArray, GL_TEXTURE_BORDER_COLOR, border);
+	glTextureParameteri(this->m_shadowTexArray, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+	glTextureParameteri(this->m_shadowTexArray, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+}
+
+static void computeFrustumCornersWS(const glm::mat4& viewMat, const glm::mat4& projMat, float nearD, float farD, glm::vec3 outCorners[8]) {
+	// Build 8 corners for the sub-frustum slice [nearD, farD] in world space.
+	glm::mat4 invView = glm::inverse(viewMat);
+	glm::mat4 invProj = glm::inverse(projMat);
+	const glm::vec2 ndcCorners[4] = {
+		{-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}
+	};
+	for (int i = 0; i < 4; ++i) {
+		glm::vec4 cornerVS4 = invProj * glm::vec4(ndcCorners[i].x, ndcCorners[i].y, 1.0f, 1.0f);
+		cornerVS4 /= cornerVS4.w;
+		glm::vec3 ray = glm::vec3(cornerVS4);
+		float nearT = nearD / (-ray.z);
+		float farT = farD / (-ray.z);
+		glm::vec3 nearVS = ray * nearT;
+		glm::vec3 farVS = ray * farT;
+		outCorners[i + 0] = glm::vec3(invView * glm::vec4(nearVS, 1.0f));
+		outCorners[i + 4] = glm::vec3(invView * glm::vec4(farVS, 1.0f));
+	}
+}
+
+void SceneRenderer::updateShadowMatrices() {
+	const glm::vec3 lightDirWorld = glm::normalize(glm::vec3(0.4f, 0.5f, 0.8f));
+	const glm::vec3 forward = glm::normalize(-lightDirWorld);
+	glm::vec3 up(0.0f, 1.0f, 0.0f);
+	if (std::abs(glm::dot(forward, up)) > 0.99f) up = glm::vec3(0.0f, 0.0f, 1.0f);
+
+	// Always base cascades on player view/projection (culling view/VP).
+	const glm::mat4 playerView = this->m_cullView;
+	const glm::mat4 playerProj = this->m_cullVP * glm::inverse(this->m_cullView);
+
+	for (int c = 0; c < 3; ++c) {
+		glm::vec3 cornersWS[8];
+		computeFrustumCornersWS(playerView, playerProj, this->m_shadowCascadeNear[c], this->m_shadowCascadeFar[c], cornersWS);
+
+		glm::vec3 center(0.0f);
+		for (const auto& p : cornersWS) center += p;
+		center *= (1.0f / 8.0f);
+
+		const glm::mat4 lightView = glm::lookAt(center - forward * 1000.0f, center, up);
+		glm::vec3 minLS(FLT_MAX), maxLS(-FLT_MAX);
+		for (const auto& p : cornersWS) {
+			glm::vec3 ls = glm::vec3(lightView * glm::vec4(p, 1.0f));
+			minLS = glm::min(minLS, ls);
+			maxLS = glm::max(maxLS, ls);
+		}
+
+		// Padding to reduce clipping & acne.
+		const float padXY = 10.0f;
+		minLS.x -= padXY; minLS.y -= padXY;
+		maxLS.x += padXY; maxLS.y += padXY;
+		const float padZ = 50.0f;
+
+		// Stabilize by snapping the ortho center to texel size.
+		const float extentX = maxLS.x - minLS.x;
+		const float extentY = maxLS.y - minLS.y;
+		float centerX = 0.5f * (minLS.x + maxLS.x);
+		float centerY = 0.5f * (minLS.y + maxLS.y);
+		const float texelX = extentX / (float)this->m_shadowMapSize;
+		const float texelY = extentY / (float)this->m_shadowMapSize;
+		if (texelX > 0.0f) centerX = std::floor(centerX / texelX) * texelX;
+		if (texelY > 0.0f) centerY = std::floor(centerY / texelY) * texelY;
+		minLS.x = centerX - 0.5f * extentX;
+		maxLS.x = centerX + 0.5f * extentX;
+		minLS.y = centerY - 0.5f * extentY;
+		maxLS.y = centerY + 0.5f * extentY;
+
+		// glm::lookAt looks down -Z, so convert light-space z (likely negative) to near/far distances.
+		const float zNear = std::max(0.1f, -maxLS.z - padZ);
+		const float zFar  = std::max(zNear + 0.1f, -minLS.z + padZ);
+		const glm::mat4 lightProj = glm::ortho(minLS.x, maxLS.x, minLS.y, maxLS.y, zNear, zFar);
+		this->m_shadowLightVP[c] = lightProj * lightView;
+	}
+}
+
+void SceneRenderer::buildShadowMaps() {
+	if (!this->m_shadowEnabled || this->m_shadowProgram == nullptr) return;
+	this->ensureShadowResources();
+	if (this->m_shadowFBO == 0 || this->m_shadowTexArray == 0) return;
+
+	this->updateShadowMatrices();
+
+	glBindFramebuffer(GL_FRAMEBUFFER, this->m_shadowFBO);
+	glDrawBuffer(GL_NONE);
+	glReadBuffer(GL_NONE);
+	glEnable(GL_DEPTH_TEST);
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+	glEnable(GL_POLYGON_OFFSET_FILL);
+	glPolygonOffset(2.0f, 4.0f);
+
+	this->m_shadowProgram->useProgram();
+
+	for (int layer = 0; layer < 3; ++layer) {
+		glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, this->m_shadowTexArray, 0, layer);
+		glViewport(0, 0, this->m_shadowMapSize, this->m_shadowMapSize);
+		glClearDepth(1.0);
+		glClear(GL_DEPTH_BUFFER_BIT);
+
+		// Common shadow uniforms
+		glUniformMatrix4fv(20, 1, GL_FALSE, glm::value_ptr(this->m_shadowLightVP[layer])); // lightVP
+
+		// Dynamic objects: airplane + magic stone (skip pure-color debug objects)
+		glUniform1i(21, 0); // useInstancing = 0
+		for (DynamicSceneObject* obj : this->m_dynamicSOs) {
+			if (!obj) continue;
+			if (obj->pixelFunctionId() != SceneManager::Instance()->m_fs_texturePass) continue;
+			glBindVertexArray(obj->vao());
+			glUniformMatrix4fv(0, 1, GL_FALSE, glm::value_ptr(obj->modelMat()));
+			glDrawElements(obj->primitive(), obj->indexCount(), GL_UNSIGNED_INT, nullptr);
+		}
+
+		// Instance batches: airplane/stone are not here; cast for buildings + bush01/bush05.
+		glUniform1i(21, 1); // useInstancing = 1 (uses VisibleBuffer indices)
+		for (auto& batch : this->m_instanceBatches) {
+			if (batch.numInstances == 0) continue;
+			const bool castShadow =
+				(batch.name == "bush01") || (batch.name == "bush05") ||
+				(batch.name == "buildingV1") || (batch.name == "buildingV2");
+			if (!castShadow) continue;
+			glBindVertexArray(batch.vao);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, batch.instanceBuffer);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, batch.visibleIndexBuffer);
+			glBindBuffer(GL_DRAW_INDIRECT_BUFFER, batch.indirectBuffer);
+			glDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, 0);
+		}
+	}
+
+	glDisable(GL_POLYGON_OFFSET_FILL);
+	glBindVertexArray(0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	// Restore viewport for subsequent passes.
+	glViewport(this->m_curViewportX, this->m_curViewportY, this->m_curViewportW, this->m_curViewportH);
 }
 
 GLuint SceneRenderer::loadTexture(const std::string& path) {
@@ -361,7 +557,7 @@ void SceneRenderer::setUpInstanceBatches() {
 			batch.numInstances = sample->m_numSample;
 
 			std::vector<InstanceDataGPU> instanceData(batch.numInstances);
-			for(int i=0;i<batch.numInstances;i++){
+			for(uint32_t i = 0; i < batch.numInstances; ++i){
 				glm::vec3 pos(
 					sample->m_positions[i*3+0],
 					sample->m_positions[i*3+1],
@@ -872,6 +1068,15 @@ void SceneRenderer::renderGeometryPass(const bool recomputeVisibility, const boo
 
 	// pass 2: foliage instances with occlusion culling
 	this->renderInstanceBatches(true, recomputeVisibility);
+
+	// Build shadow maps once per frame, AFTER visibility is computed, so culled objects don't cast shadows.
+	if (recomputeVisibility && buildPyramids && this->m_shadowEnabled && !this->m_shadowBuiltThisFrame) {
+		this->buildShadowMaps();
+		this->m_shadowBuiltThisFrame = true;
+		// Restore G-buffer binding/viewport in case subsequent code assumes it.
+		glBindFramebuffer(GL_FRAMEBUFFER, this->m_gbufferFBO);
+		glViewport(this->m_curViewportX, this->m_curViewportY, this->m_curViewportW, this->m_curViewportH);
+	}
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -924,6 +1129,12 @@ void SceneRenderer::renderDisplayPass() {
 	} else {
 		glBindTexture(GL_TEXTURE_2D, this->m_gbufferDepthTex);
 	}
+	glActiveTexture(GL_TEXTURE6);
+	if (this->m_shadowTexArray != 0) {
+		glBindTexture(GL_TEXTURE_2D_ARRAY, this->m_shadowTexArray);
+	} else {
+		glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+	}
 
 	glUniform1i(this->m_displayModeHandle, this->m_gbufferDisplayMode);
 	glUniform1i(this->m_displayDepthMipLevelHandle, this->m_depthDisplayLevel);
@@ -931,6 +1142,12 @@ void SceneRenderer::renderDisplayPass() {
 	glUniformMatrix4fv(this->m_displayInvProjHandle, 1, GL_FALSE, glm::value_ptr(invProj));
 	glUniform1f(14, this->m_depthVisFar);
 	glUniform1f(16, this->m_depthVisGamma);
+	glUniform1i(this->m_shadowEnabledHandle, this->m_shadowEnabled ? 1 : 0);
+	glUniform1i(this->m_shadowCascadeVizEnabledHandle, this->m_shadowCascadeVizEnabled ? 1 : 0);
+	glUniform3f(this->m_shadowCascadeFarHandle, this->m_shadowCascadeFar[0], this->m_shadowCascadeFar[1], this->m_shadowCascadeFar[2]);
+	glUniformMatrix4fv(this->m_shadowLightVPHandle, 3, GL_FALSE, glm::value_ptr(this->m_shadowLightVP[0]));
+	// Always base cascade visualization ranges on player (culling) view-space depth.
+	glUniformMatrix4fv(this->m_shadowCullViewMatHandle, 1, GL_FALSE, glm::value_ptr(this->m_cullView));
 	float uvScaleX = 1.0f, uvScaleY = 1.0f, uvBiasX = 0.0f, uvBiasY = 0.0f;
 	if (this->m_gbufferDisplayMode == 6 && this->m_depthVizTex != 0) {
 		// depth viz texture is already viewport-sized: map to texel centers in [0,1]

@@ -88,6 +88,13 @@ private:
 	GLint m_displayViewMatHandle = -1;
 	GLint m_displayDepthMipLevelHandle = -1;
 	GLint m_displayInvProjHandle = -1;
+	// shadow display uniforms (in gbufferDisplayFragment.glsl)
+	GLint m_shadowEnabledHandle = 17;
+	GLint m_shadowCascadeVizEnabledHandle = 18;
+	GLint m_shadowCascadeFarHandle = 19;
+	GLint m_shadowLightVPHandle = 20; // mat4[3] occupies locations 20..31
+	GLint m_shadowMapHandle = 32;
+	GLint m_shadowCullViewMatHandle = 34; // mat4 occupies locations 34..37
 	GLuint m_screenVAO = 0;
 	GLuint m_screenVBO = 0;
 	GLuint m_screenEBO = 0;
@@ -125,6 +132,18 @@ private:
 	float m_occlusionBias = 0.0005f;
 	int m_occlusionFixedLevelOverride = -1; // -1 => use ceil(levels * 0.5)
 	float m_occlusionMaxViewDepth = 400.0f;
+
+	// cascaded shadow mapping
+	bool m_shadowEnabled = false;
+	bool m_shadowCascadeVizEnabled = false;
+	bool m_shadowBuiltThisFrame = false;
+	int m_shadowMapSize = 2048;
+	GLuint m_shadowFBO = 0;
+	GLuint m_shadowTexArray = 0; // depth texture array [3]
+	ShaderProgram* m_shadowProgram = nullptr;
+	glm::mat4 m_shadowLightVP[3] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
+	float m_shadowCascadeNear[3] = { 1.0f, 50.0f, 200.0f };
+	float m_shadowCascadeFar[3]  = { 50.0f, 200.0f, 500.0f };
 
 public:
 	void resize(const int w, const int h);
@@ -166,6 +185,8 @@ public:
 	void setOcclusionBias(const float bias) { m_occlusionBias = bias; }
 	void setOcclusionFixedLevelOverride(const int level) { m_occlusionFixedLevelOverride = level; }
 	void setOcclusionMaxViewDepth(const float maxDepth) { m_occlusionMaxViewDepth = maxDepth; }
+	void setShadowEnabled(const bool enabled) { m_shadowEnabled = enabled; }
+	void setShadowCascadeVizEnabled(const bool enabled) { m_shadowCascadeVizEnabled = enabled; }
 
 private:
 	void clear(const glm::vec4 &clearColor = glm::vec4(0.0, 0.0, 0.0, 1.0), const float depth = 1.0);
@@ -193,4 +214,9 @@ private:
 	void destroyDepthVizPyramid();
 	void buildDepthVizPyramid();
 	void ensureOcclusionPyramid(const int w, const int h);
+	bool setUpShadowShader();
+	void ensureShadowResources();
+	void destroyShadowResources();
+	void buildShadowMaps();
+	void updateShadowMatrices();
 };
